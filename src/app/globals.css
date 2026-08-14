@@ -1,0 +1,141 @@
+:root {
+  --tq-charcoal: #1c1b19;
+  --tq-gold: #c9a227;
+  --tq-paper: #f6f4f0;
+  --tq-line: rgba(28, 27, 25, 0.1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--tq-paper);
+  color: var(--tq-charcoal);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Arabic content — user-generated or agent-generated — always declares its own
+   direction so a mixed EN/AR string never renders scrambled. */
+.tq-ar {
+  font-family: var(--font-arabic), 'Segoe UI', Tahoma, sans-serif;
+  line-height: 1.9;
+}
+
+/* Metrics stay Latin-digit and LTR even inside an RTL page. */
+.tq-num {
+  direction: ltr;
+  unicode-bidi: isolate;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Directional icons mirror with the document; symbols like ✓ must not. */
+[dir='rtl'] .tq-mirror {
+  transform: scaleX(-1);
+}
+
+.tq-page {
+  padding: 24px;
+  max-width: 1240px;
+  margin-inline: auto;
+}
+
+.tq-page-header {
+  margin-block-end: 20px;
+}
+
+.tq-page-header h1 {
+  margin: 0 0 4px;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.tq-page-header p {
+  margin: 0;
+  color: rgba(28, 27, 25, 0.6);
+  font-size: 13px;
+}
+
+/* Logical spacing helpers — never ml/mr, so RTL needs no overrides. */
+.tq-stack > * + * {
+  margin-block-start: 16px;
+}
+
+.tq-inline-end {
+  margin-inline-start: auto;
+}
+
+.tq-muted {
+  color: rgba(28, 27, 25, 0.55);
+}
+
+.tq-hook {
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.8;
+  margin: 0 0 8px;
+}
+
+.tq-markdown {
+  line-height: 1.95;
+}
+
+.tq-markdown h1,
+.tq-markdown h2,
+.tq-markdown h3 {
+  margin-block: 1.2em 0.5em;
+  font-weight: 600;
+}
+
+.tq-markdown h1 {
+  font-size: 1.4rem;
+}
+
+.tq-markdown h2 {
+  font-size: 1.2rem;
+}
+
+.tq-markdown h3 {
+  font-size: 1.05rem;
+}
+
+.tq-markdown ul,
+.tq-markdown ol {
+  padding-inline-start: 1.4em;
+  margin-block: 0.6em;
+}
+
+.tq-markdown table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-block: 1em;
+}
+
+.tq-markdown th,
+.tq-markdown td {
+  border: 1px solid var(--tq-line);
+  padding: 8px 10px;
+  text-align: start;
+}
+
+.tq-markdown blockquote {
+  margin-inline: 0;
+  padding-inline-start: 14px;
+  border-inline-start: 3px solid var(--tq-gold);
+  color: rgba(28, 27, 25, 0.7);
+}
+
+.tq-login {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: linear-gradient(160deg, #f6f4f0 0%, #eceae4 100%);
+}

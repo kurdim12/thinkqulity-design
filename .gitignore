@@ -1,0 +1,21 @@
+node_modules/
+.next/
+out/
+build/
+.DS_Store
+
+# Environment — never commit real keys
+.env
+.env.local
+.env*.local
+
+# Client data exports: real engagement JSON stays out of git
+data-exports/
+*.apify.json
+
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+next-env.d.ts.bak
+tsconfig.tsbuildinfo
+.vercel
