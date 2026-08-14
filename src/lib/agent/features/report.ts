@@ -26,7 +26,7 @@ export const reportFeature = defineFeature<Input, ReportResponse>({
   contextBlocks: ['brand', 'latest_snapshot', 'pillars', 'recent_concepts'],
   inputSchema,
   schema: reportResponseSchema,
-  maxTokens: 16000,
+  maxTokens: 24000,
 
   preflight(_input, ctx) {
     if (!ctx.latestSnapshot) {

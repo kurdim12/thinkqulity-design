@@ -1,35 +1,27 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { z } from 'zod';
-import { requireEnv, optionalEnv } from '@/lib/env';
+import { requireEnv } from '@/lib/env';
 import { HttpError } from '@/lib/auth';
-import { SYSTEM_PROMPT } from './system';
 import type { Quality } from '@/lib/prefs';
+import { SYSTEM_PROMPT } from './system';
+import { effortFor, modelFor, providerKeyName, resolveProvider, type Provider } from './provider';
 
 export type { Quality };
+export { modelFor, resolveProvider };
 
-/**
- * Model tiers behind the header switch. Both IDs are overridable via env so the
- * studio can pin a different generation without a code change.
- */
-export function modelFor(quality: Quality): string {
-  return quality === 'high'
-    ? optionalEnv('ANTHROPIC_MODEL_QUALITY') ?? 'claude-opus-4-8'
-    : optionalEnv('ANTHROPIC_MODEL_STANDARD') ?? 'claude-sonnet-4-6';
-}
+/** Wall-clock ceiling for one generation, below the route's maxDuration. */
+const REQUEST_TIMEOUT_MS = 280_000;
 
-function effortFor(quality: Quality): 'medium' | 'high' {
-  return quality === 'high' ? 'high' : 'medium';
-}
-
-let client: Anthropic | null = null;
+let anthropicClient: Anthropic | null = null;
 function anthropic(): Anthropic {
-  if (!client) client = new Anthropic({ apiKey: requireEnv('ANTHROPIC_API_KEY') });
-  return client;
+  if (!anthropicClient) anthropicClient = new Anthropic({ apiKey: requireEnv('ANTHROPIC_API_KEY') });
+  return anthropicClient;
 }
 
 /**
  * Pulls the JSON object out of a model response. The system prompt asks for raw
- * JSON, but a stray ```json fence or a leading sentence shouldn't fail a run.
+ * JSON, but a stray ```json fence or a leading sentence shouldn't fail a run —
+ * and models differ in how literally they take "no markdown".
  */
 export function extractJson(text: string): string {
   const trimmed = text.trim();
@@ -41,9 +33,132 @@ export function extractJson(text: string): string {
   return candidate.slice(start, end + 1);
 }
 
+interface Turn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+interface RawCompletion {
+  text: string;
+  inputTokens: number;
+  outputTokens: number;
+  refused: boolean;
+}
+
+/* -------------------------------------------------------------- anthropic -- */
+
+async function callAnthropic(
+  model: string,
+  quality: Quality,
+  turns: Turn[],
+  maxTokens: number,
+): Promise<RawCompletion> {
+  // Streamed so a long generation can't trip an HTTP idle timeout.
+  const stream = anthropic().messages.stream({
+    model,
+    max_tokens: maxTokens,
+    system: SYSTEM_PROMPT,
+    thinking: { type: 'adaptive' },
+    output_config: { effort: effortFor(quality) },
+    messages: turns.map((t) => ({ role: t.role, content: t.content })),
+  });
+
+  const message = await stream.finalMessage();
+
+  return {
+    text: message.content
+      .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n')
+      .trim(),
+    inputTokens: message.usage.input_tokens,
+    outputTokens: message.usage.output_tokens,
+    refused: message.stop_reason === 'refusal',
+  };
+}
+
+/* ------------------------------------------------------------- openrouter -- */
+
+interface OpenRouterResponse {
+  choices?: { message?: { content?: string | null }; finish_reason?: string }[];
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  error?: { message?: string; code?: number };
+}
+
+async function callOpenRouter(
+  model: string,
+  quality: Quality,
+  turns: Turn[],
+  maxTokens: number,
+): Promise<RawCompletion> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        authorization: `Bearer ${requireEnv('OPENROUTER_API_KEY')}`,
+        'content-type': 'application/json',
+        // Optional attribution headers OpenRouter uses for its dashboards.
+        'x-title': 'ThinkQuality Studio',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        // Models that don't support reasoning ignore this rather than erroring.
+        reasoning: { effort: effortFor(quality) },
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          ...turns.map((t) => ({ role: t.role, content: t.content })),
+        ],
+      }),
+    });
+
+    const payload = (await response.json().catch(() => null)) as OpenRouterResponse | null;
+
+    if (!response.ok) {
+      throw new HttpError(
+        502,
+        `OpenRouter returned ${response.status}: ${payload?.error?.message ?? response.statusText}`,
+        `Check the model id "${model}" is spelled exactly as listed on openrouter.ai/models, and that the key has credit.`,
+      );
+    }
+
+    if (payload?.error) {
+      throw new HttpError(502, `OpenRouter error: ${payload.error.message ?? 'unknown'}`);
+    }
+
+    const choice = payload?.choices?.[0];
+
+    return {
+      text: (choice?.message?.content ?? '').trim(),
+      inputTokens: payload?.usage?.prompt_tokens ?? 0,
+      outputTokens: payload?.usage?.completion_tokens ?? 0,
+      refused: choice?.finish_reason === 'content_filter',
+    };
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new HttpError(
+        504,
+        'The model took too long to respond.',
+        'Try the standard tier, or a smaller request.',
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* ------------------------------------------------------------------ run --- */
+
 export interface AgentRunResult<T> {
   value: T;
   model: string;
+  provider: Provider;
   attempts: number;
   usage: { input_tokens: number; output_tokens: number };
 }
@@ -57,40 +172,41 @@ interface RunArgs<T> {
 }
 
 /**
- * One agent call: stream (so long generations don't hit an HTTP timeout),
- * parse, validate against zod, and retry exactly once with the validation
- * error fed back. A second failure is a 502 — we never hand unvalidated
- * model output to the database.
+ * One agent call: send, parse, validate against zod, and retry exactly once
+ * with the validation error fed back. A second failure is a 502 — we never
+ * hand unvalidated model output to the database.
+ *
+ * Provider-agnostic on purpose: the honesty contract lives in the system
+ * prompt and the schema, not in whose API answers.
  */
 export async function runAgentJson<T>({
   userMessage,
   schema,
   quality,
-  maxTokens = 8000,
+  maxTokens = 12000,
 }: RunArgs<T>): Promise<AgentRunResult<T>> {
-  const model = modelFor(quality);
-  const messages: Anthropic.MessageParam[] = [{ role: 'user', content: userMessage }];
+  const provider = resolveProvider();
+  const model = modelFor(quality, provider);
+  const turns: Turn[] = [{ role: 'user', content: userMessage }];
+
+  // Fail early and clearly rather than deep inside an SDK call.
+  requireEnv(providerKeyName(provider));
 
   let usage = { input_tokens: 0, output_tokens: 0 };
   let lastProblem = '';
 
   for (let attempt = 1; attempt <= 2; attempt += 1) {
-    const stream = anthropic().messages.stream({
-      model,
-      max_tokens: maxTokens,
-      system: SYSTEM_PROMPT,
-      thinking: { type: 'adaptive' },
-      output_config: { effort: effortFor(quality) },
-      messages,
-    });
+    const completion =
+      provider === 'openrouter'
+        ? await callOpenRouter(model, quality, turns, maxTokens)
+        : await callAnthropic(model, quality, turns, maxTokens);
 
-    const message = await stream.finalMessage();
     usage = {
-      input_tokens: usage.input_tokens + message.usage.input_tokens,
-      output_tokens: usage.output_tokens + message.usage.output_tokens,
+      input_tokens: usage.input_tokens + completion.inputTokens,
+      output_tokens: usage.output_tokens + completion.outputTokens,
     };
 
-    if (message.stop_reason === 'refusal') {
+    if (completion.refused) {
       throw new HttpError(
         502,
         'The model declined this request.',
@@ -98,18 +214,12 @@ export async function runAgentJson<T>({
       );
     }
 
-    const raw = message.content
-      .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-      .map((block) => block.text)
-      .join('\n')
-      .trim();
-
-    if (!raw) {
+    if (!completion.text) {
       lastProblem = 'The response contained no text.';
     } else {
       let parsed: unknown;
       try {
-        parsed = JSON.parse(extractJson(raw));
+        parsed = JSON.parse(extractJson(completion.text));
       } catch (err) {
         lastProblem = `The response was not valid JSON: ${(err as Error).message}`;
         parsed = undefined;
@@ -118,7 +228,7 @@ export async function runAgentJson<T>({
       if (parsed !== undefined) {
         const result = schema.safeParse(parsed);
         if (result.success) {
-          return { value: result.data, model, attempts: attempt, usage };
+          return { value: result.data, model, provider, attempts: attempt, usage };
         }
         lastProblem = result.error.issues
           .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
@@ -127,8 +237,8 @@ export async function runAgentJson<T>({
     }
 
     if (attempt === 1) {
-      messages.push({ role: 'assistant', content: raw || '(empty response)' });
-      messages.push({
+      turns.push({ role: 'assistant', content: completion.text || '(empty response)' });
+      turns.push({
         role: 'user',
         content: `That response failed schema validation: ${lastProblem}\n\nReturn the corrected object now. Output ONLY the JSON object — no prose, no markdown fences.`,
       });
@@ -137,7 +247,7 @@ export async function runAgentJson<T>({
 
   throw new HttpError(
     502,
-    'The agent returned output that does not match the required schema.',
+    `The agent (${model}) returned output that does not match the required schema.`,
     lastProblem || 'Try again, or switch the model quality toggle in the header.',
   );
 }

@@ -24,7 +24,9 @@ export const conceptsFeature = defineFeature<Input, ConceptsResponse>({
   contextBlocks: ['brand', 'latest_snapshot', 'pillars', 'recent_concepts'],
   inputSchema,
   schema: conceptsResponseSchema,
-  maxTokens: 12000,
+  // max_tokens covers thinking + response text, and thinking is on by default
+  // on the current frontier models — leave headroom or output truncates.
+  maxTokens: 16000,
 
   buildPrompt(input) {
     const theme = input.theme?.trim();

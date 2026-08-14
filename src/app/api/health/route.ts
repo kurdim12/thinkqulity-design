@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server';
 import { requireOperator, errorResponse } from '@/lib/auth';
 import { hasEnv, allowedEmails, optionalEnv } from '@/lib/env';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { modelFor } from '@/lib/agent/client';
+import { modelFor, resolveProvider } from '@/lib/agent/client';
+import { providerKeyName } from '@/lib/agent/provider';
 import { featureIds } from '@/lib/agent/features/registry';
 
 export const dynamic = 'force-dynamic';
@@ -18,13 +19,17 @@ export interface HealthCheck {
 export async function GET() {
   try {
     const operator = await requireOperator();
+    const provider = resolveProvider();
+    const keyName = providerKeyName(provider);
 
     const checks: HealthCheck[] = [
       {
-        key: 'ANTHROPIC_API_KEY',
-        label: 'Anthropic API key',
-        ok: hasEnv('ANTHROPIC_API_KEY'),
-        detail: hasEnv('ANTHROPIC_API_KEY') ? 'Present' : 'Missing — generation will fail',
+        key: keyName,
+        label: provider === 'openrouter' ? 'OpenRouter API key' : 'Anthropic API key',
+        ok: hasEnv(keyName),
+        detail: hasEnv(keyName)
+          ? `Present — routing through ${provider}`
+          : `Missing — generation will fail (${keyName})`,
       },
       {
         key: 'NEXT_PUBLIC_SUPABASE_URL',
@@ -70,6 +75,7 @@ export async function GET() {
       operator,
       allowlist: allowedEmails(),
       checks,
+      provider,
       models: { standard: modelFor('standard'), high: modelFor('high') },
       features: featureIds(),
     });

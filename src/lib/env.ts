@@ -5,11 +5,17 @@
 
 export type EnvKey =
   | 'ANTHROPIC_API_KEY'
+  | 'OPENROUTER_API_KEY'
   | 'NEXT_PUBLIC_SUPABASE_URL'
   | 'NEXT_PUBLIC_SUPABASE_ANON_KEY'
   | 'SUPABASE_SERVICE_ROLE_KEY'
   | 'ALLOWED_EMAILS'
+  // Optional. 'anthropic' | 'openrouter'; inferred from whichever key is set.
+  | 'AI_PROVIDER'
   // Optional overrides — the two model tiers behind the header quality switch.
+  | 'AI_MODEL_STANDARD'
+  | 'AI_MODEL_QUALITY'
+  // Legacy aliases, still honoured.
   | 'ANTHROPIC_MODEL_STANDARD'
   | 'ANTHROPIC_MODEL_QUALITY';
 

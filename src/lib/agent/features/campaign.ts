@@ -22,7 +22,7 @@ export const campaignFeature = defineFeature<Input, CampaignResponse>({
   contextBlocks: ['brand', 'latest_snapshot', 'pillars', 'recent_concepts'],
   inputSchema,
   schema: campaignResponseSchema,
-  maxTokens: 14000,
+  maxTokens: 20000,
 
   buildPrompt(input) {
     return [

@@ -18,6 +18,7 @@ interface HealthResponse {
   operator: { id: string; email: string };
   allowlist: string[];
   checks: HealthCheck[];
+  provider: 'anthropic' | 'openrouter';
   models: { standard: string; high: string };
   features: string[];
 }
@@ -70,6 +71,9 @@ export default function SettingsPage() {
           <ErrorState error={error} hint={hint} onRetry={load} />
         ) : data ? (
           <Descriptions size="small" column={1} style={{ marginBlockStart: 16 }}>
+            <Descriptions.Item label={tt('المزوّد', 'Provider')}>
+              <code dir="ltr">{data.provider}</code>
+            </Descriptions.Item>
             <Descriptions.Item label={t.header.standard}>
               <code dir="ltr">{data.models.standard}</code>
             </Descriptions.Item>

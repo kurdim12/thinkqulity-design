@@ -33,8 +33,8 @@ If you change one thing in this codebase, don't change that.
 ## Stack
 
 Next.js 15 (App Router) · TypeScript strict · Ant Design v5 · Supabase
-(Postgres + Auth) · Anthropic API · deployable to Cloudflare Pages via OpenNext
-or to Vercel.
+(Postgres + Auth) · Anthropic API **or** OpenRouter · deployable to Cloudflare
+Pages via OpenNext or to Vercel.
 
 Fonts: IBM Plex Sans Arabic (Arabic) + Inter (Latin), via `next/font`.
 
@@ -60,18 +60,36 @@ Fill in:
 
 | Variable | Where it comes from |
 |---|---|
-| `ANTHROPIC_API_KEY` | console.anthropic.com → API keys. Server-side only; never reaches the browser. |
+| `ANTHROPIC_API_KEY` **or** `OPENROUTER_API_KEY` | console.anthropic.com → API keys, or openrouter.ai/keys. Set one. Server-side only; neither reaches the browser. |
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase → Project Settings → API |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | same page (public by design) |
 | `SUPABASE_SERVICE_ROLE_KEY` | same page — **secret**, bypasses RLS |
 | `ALLOWED_EMAILS` | Comma-separated. Only these addresses can request a sign-in code. |
 
-Optional model overrides (defaults shown):
+### Choosing a provider and models
+
+The provider is inferred from whichever key you set (OpenRouter wins if both
+are present); `AI_PROVIDER=anthropic|openrouter` forces it.
+
+Defaults are the current frontier tier:
+
+| Header switch | Model |
+|---|---|
+| Standard | `claude-sonnet-5` |
+| Quality | `claude-opus-5` |
+
+Claude Opus 5 tops the August 2026 Artificial Analysis index and leads
+specifically on agentic work, which is what this app does. Override either
+tier — on OpenRouter any id from openrouter.ai/models works:
 
 ```
-ANTHROPIC_MODEL_STANDARD=claude-sonnet-4-6
-ANTHROPIC_MODEL_QUALITY=claude-opus-4-8
+AI_MODEL_QUALITY=openai/gpt-5.6-sol
+AI_MODEL_STANDARD=google/gemini-3.7-flash
 ```
+
+Going through OpenRouter costs one extra network hop and gives up
+Anthropic-native niceties, but buys a single key across every vendor and lets
+you A/B a different frontier model by editing one line.
 
 ### 3. Database
 
@@ -147,9 +165,14 @@ once** with the validation error fed back. A second failure is a 502 — the app
 would rather show you an error than write unvalidated model output into the
 database.
 
-Both model tiers run with adaptive thinking; the header switch picks the tier
-and the API routes read it from a cookie, so a toggle applies to the very next
-generation.
+Both model tiers run with adaptive thinking (`reasoning.effort` on OpenRouter);
+the header switch picks the tier and the API routes read it from a cookie, so a
+toggle applies to the very next generation.
+
+The transport is swappable and the contract is not: whichever provider answers,
+the same system prompt, the same four context blocks and the same zod
+validation apply. The honesty rules live in the prompt and the schema, not in
+whose API is on the other end.
 
 ---
 
