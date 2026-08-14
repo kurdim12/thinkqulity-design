@@ -15,6 +15,7 @@ import {
   Form,
   Modal,
   DatePicker,
+  Tabs,
   App,
 } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
@@ -29,6 +30,7 @@ import {
   statusLabel,
 } from '@/components/ui';
 import { ConceptCard } from '@/components/ConceptCard';
+import { StoryboardPanel } from '@/components/StoryboardPanel';
 import { formatDate, weekStartIso } from '@/lib/date';
 import type {
   AgentConcept,
@@ -375,46 +377,69 @@ export default function ConceptsPage() {
           </Space>
         }
       >
-        <Form form={editForm} layout="vertical">
-          <Form.Item name="title" label={tt('العنوان', 'Title')} rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="hook_ar" label={tt('الخطاف', 'Hook')} rules={[{ required: true }]}>
-            <Input.TextArea dir="auto" />
-          </Form.Item>
-          <Form.Item name="caption_ar" label={tt('النص', 'Caption')} rules={[{ required: true }]}>
-            <Input.TextArea dir="auto" rows={8} />
-          </Form.Item>
-          <Form.Item
-            name="visual_direction"
-            label={tt('الاتجاه البصري', 'Visual direction')}
-            rules={[{ required: true }]}
-          >
-            <Input.TextArea dir="auto" />
-          </Form.Item>
-          <Form.Item name="why" label={tt('لماذا', 'Why')} rules={[{ required: true }]}>
-            <Input.TextArea dir="auto" />
-          </Form.Item>
-          <Form.Item name="format" label={tt('الصيغة', 'Format')} rules={[{ required: true }]}>
-            <Select<ConceptFormat>
-              options={[
-                { label: tt('ريل', 'Reel'), value: 'reel' },
-                { label: tt('كاروسيل', 'Carousel'), value: 'carousel' },
-                { label: tt('صورة ثابتة', 'Static'), value: 'static' },
-                { label: tt('ستوري', 'Story'), value: 'story' },
-              ]}
-            />
-          </Form.Item>
-          <Form.Item name="pillar_id" label={tt('المحور', 'Pillar')}>
-            <Select
-              allowClear
-              options={pillars.map((p) => ({
-                label: locale === 'ar' ? p.name_ar : p.name_en ?? p.name_ar,
-                value: p.id,
-              }))}
-            />
-          </Form.Item>
-        </Form>
+        <Tabs
+          items={[
+            {
+              key: 'details',
+              label: tt('التفاصيل', 'Details'),
+              children: (
+                <Form form={editForm} layout="vertical">
+                  <Form.Item name="title" label={tt('العنوان', 'Title')} rules={[{ required: true }]}>
+                    <Input />
+                  </Form.Item>
+                  <Form.Item name="hook_ar" label={tt('الخطاف', 'Hook')} rules={[{ required: true }]}>
+                    <Input.TextArea dir="auto" />
+                  </Form.Item>
+                  <Form.Item name="caption_ar" label={tt('النص', 'Caption')} rules={[{ required: true }]}>
+                    <Input.TextArea dir="auto" rows={8} />
+                  </Form.Item>
+                  <Form.Item
+                    name="visual_direction"
+                    label={tt('الاتجاه البصري', 'Visual direction')}
+                    rules={[{ required: true }]}
+                  >
+                    <Input.TextArea dir="auto" />
+                  </Form.Item>
+                  <Form.Item name="why" label={tt('لماذا', 'Why')} rules={[{ required: true }]}>
+                    <Input.TextArea dir="auto" />
+                  </Form.Item>
+                  <Form.Item name="format" label={tt('الصيغة', 'Format')} rules={[{ required: true }]}>
+                    <Select<ConceptFormat>
+                      options={[
+                        { label: tt('ريل', 'Reel'), value: 'reel' },
+                        { label: tt('كاروسيل', 'Carousel'), value: 'carousel' },
+                        { label: tt('صورة ثابتة', 'Static'), value: 'static' },
+                        { label: tt('ستوري', 'Story'), value: 'story' },
+                      ]}
+                    />
+                  </Form.Item>
+                  <Form.Item name="pillar_id" label={tt('المحور', 'Pillar')}>
+                    <Select
+                      allowClear
+                      options={pillars.map((p) => ({
+                        label: locale === 'ar' ? p.name_ar : p.name_en ?? p.name_ar,
+                        value: p.id,
+                      }))}
+                    />
+                  </Form.Item>
+                </Form>
+              ),
+            },
+            {
+              key: 'storyboard',
+              label: tt('الستوري بورد', 'Storyboard'),
+              children: editing ? (
+                <StoryboardPanel
+                  concept={editing}
+                  onUpdated={(updated) => {
+                    updateConceptLocal(updated);
+                    setEditing(updated);
+                  }}
+                />
+              ) : null,
+            },
+          ]}
+        />
       </Drawer>
 
       <Modal

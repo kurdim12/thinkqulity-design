@@ -15,6 +15,9 @@ import {
   SettingOutlined,
   UserOutlined,
   ThunderboltOutlined,
+  TableOutlined,
+  ReadOutlined,
+  SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import { useLocale } from '@/lib/i18n/LocaleContext';
 import { useQuality } from '@/components/Providers';
@@ -39,6 +42,9 @@ export function Shell({ email, children }: { email: string; children: React.Reac
     { key: '/campaigns', icon: <RocketOutlined />, label: t.nav.campaigns },
     { key: '/calendar', icon: <CalendarOutlined />, label: t.nav.calendar },
     { key: '/reports', icon: <FileTextOutlined />, label: t.nav.reports },
+    { key: '/board', icon: <TableOutlined />, label: t.nav.board },
+    { key: '/guideline', icon: <ReadOutlined />, label: t.nav.guideline },
+    { key: '/compliance', icon: <SafetyCertificateOutlined />, label: t.nav.compliance },
     { key: '/settings', icon: <SettingOutlined />, label: t.nav.settings },
   ];
 

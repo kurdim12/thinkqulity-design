@@ -13,6 +13,9 @@ export const dict = {
       campaigns: 'Campaigns',
       calendar: 'Calendar',
       reports: 'Reports',
+      board: 'The Board',
+      guideline: 'Guideline',
+      compliance: 'Compliance',
       settings: 'Settings',
     },
     header: {
@@ -61,6 +64,9 @@ export const dict = {
       campaigns: 'الحملات',
       calendar: 'التقويم',
       reports: 'التقارير',
+      board: 'اللوحة',
+      guideline: 'دليل العلامة',
+      compliance: 'فاحص الالتزام',
       settings: 'الإعدادات',
     },
     header: {

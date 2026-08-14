@@ -3,6 +3,8 @@ import { conceptsFeature } from './concepts';
 import { campaignFeature } from './campaign';
 import { reportFeature } from './report';
 import { gapsFeature } from './gaps';
+import { guidelineFeature } from './guideline';
+import { storyboardFeature } from './storyboard';
 
 /**
  * Every agent capability, resolved by `/api/generate/[feature]`.
@@ -14,6 +16,8 @@ export const FEATURES: readonly RunnableFeature[] = [
   campaignFeature,
   reportFeature,
   gapsFeature,
+  guidelineFeature,
+  storyboardFeature,
 ];
 
 export function getFeature(id: string): RunnableFeature | undefined {
@@ -22,6 +26,11 @@ export function getFeature(id: string): RunnableFeature | undefined {
 
 export function featureIds(): string[] {
   return FEATURES.map((f) => f.id);
+}
+
+/** Which features run through the Design Brain — surfaced in Settings. */
+export function brainFeatureIds(): string[] {
+  return FEATURES.filter((f) => f.hasBrain).map((f) => f.id);
 }
 
 export type { RunnableFeature };

@@ -12,6 +12,10 @@ export type EnvKey =
   | 'ALLOWED_EMAILS'
   // Optional. 'anthropic' | 'openrouter'; inferred from whichever key is set.
   | 'AI_PROVIDER'
+  // Optional. Canon embeddings; defaults to the keyless local embedder.
+  | 'EMBEDDING_PROVIDER'
+  | 'EMBEDDING_MODEL'
+  | 'OPENAI_API_KEY'
   // Optional. Automated Instagram monitoring via Apify. Read-only.
   | 'APIFY_TOKEN'
   | 'APIFY_ACTOR'

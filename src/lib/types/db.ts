@@ -120,6 +120,17 @@ export interface PillarRow {
   generated_from: string | null;
 }
 
+/** One filmable beat of a storyboard. See src/lib/agent/features/storyboard.ts. */
+export interface Frame {
+  order: number;
+  scene_beat_ar: string;
+  overlay_ar: string;
+  shot_direction: string;
+  duration_s: number;
+  /** A swatch NAME from brand.palette, never a hex value. */
+  palette_ref: string | null;
+}
+
 export interface ConceptRow {
   id: string;
   title: string;
@@ -135,6 +146,7 @@ export interface ConceptRow {
   account: Account;
   shipped_url: string | null;
   shipped_engagement: number | null;
+  frames: Frame[] | null;
   created_at: string;
 }
 

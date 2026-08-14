@@ -52,12 +52,13 @@ async function callAnthropic(
   quality: Quality,
   turns: Turn[],
   maxTokens: number,
+  system: string,
 ): Promise<RawCompletion> {
   // Streamed so a long generation can't trip an HTTP idle timeout.
   const stream = anthropic().messages.stream({
     model,
     max_tokens: maxTokens,
-    system: SYSTEM_PROMPT,
+    system,
     thinking: { type: 'adaptive' },
     output_config: { effort: effortFor(quality) },
     messages: turns.map((t) => ({ role: t.role, content: t.content })),
@@ -90,6 +91,7 @@ async function callOpenRouter(
   quality: Quality,
   turns: Turn[],
   maxTokens: number,
+  system: string,
 ): Promise<RawCompletion> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -110,7 +112,7 @@ async function callOpenRouter(
         // Models that don't support reasoning ignore this rather than erroring.
         reasoning: { effort: effortFor(quality) },
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: system },
           ...turns.map((t) => ({ role: t.role, content: t.content })),
         ],
       }),
@@ -169,6 +171,8 @@ interface RunArgs<T> {
   schema: z.ZodType<T>;
   quality: Quality;
   maxTokens?: number;
+  /** Overrides the agent prompt. The Judge runs with its own, on fresh context. */
+  system?: string;
 }
 
 /**
@@ -184,6 +188,7 @@ export async function runAgentJson<T>({
   schema,
   quality,
   maxTokens = 12000,
+  system = SYSTEM_PROMPT,
 }: RunArgs<T>): Promise<AgentRunResult<T>> {
   const provider = resolveProvider();
   const model = modelFor(quality, provider);
@@ -198,8 +203,8 @@ export async function runAgentJson<T>({
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const completion =
       provider === 'openrouter'
-        ? await callOpenRouter(model, quality, turns, maxTokens)
-        : await callAnthropic(model, quality, turns, maxTokens);
+        ? await callOpenRouter(model, quality, turns, maxTokens, system)
+        : await callAnthropic(model, quality, turns, maxTokens, system);
 
     usage = {
       input_tokens: usage.input_tokens + completion.inputTokens,

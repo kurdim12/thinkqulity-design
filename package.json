@@ -13,7 +13,10 @@
     "doctor": "node --env-file=.env.local scripts/doctor.mjs",
     "login": "node --env-file=.env.local scripts/login-link.mjs",
     "ingest:knowledge": "node --env-file=.env.local scripts/ingest-knowledge.mjs",
-    "assets": "node --env-file=.env.local scripts/upload-assets.mjs"
+    "assets": "node --env-file=.env.local scripts/upload-assets.mjs",
+    "ingest:canon": "node --env-file=.env.local scripts/ingest-canon.mjs",
+    "demo:check": "node --env-file=.env.local scripts/demo-check.mjs",
+    "bakeoff": "node --env-file=.env.local scripts/bakeoff.mjs"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.2",
