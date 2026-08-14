@@ -43,9 +43,13 @@ export async function POST(request: Request) {
       { auth: { persistSession: false } },
     );
 
+    // Point any emailed link at our callback route rather than the bare site
+    // root, which has nothing to exchange the token with.
+    const origin = new URL(request.url).origin;
+
     const { error } = await supabase.auth.signInWithOtp({
       email: email.trim().toLowerCase(),
-      options: { shouldCreateUser: true },
+      options: { shouldCreateUser: true, emailRedirectTo: `${origin}/auth/callback` },
     });
 
     if (error) throw new HttpError(502, `Supabase could not send the code: ${error.message}`);
