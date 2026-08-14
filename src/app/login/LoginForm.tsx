@@ -19,7 +19,11 @@ export function LoginForm({ missingEnv }: { missingEnv: string[] }) {
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<{ message: string; hint: string | null } | null>(null);
+  // A failed link click redirects back here with ?error=…
+  const linkError = params.get('error');
+  const [error, setError] = useState<{ message: string; hint: string | null } | null>(
+    linkError ? { message: linkError, hint: null } : null,
+  );
 
   const configured = missingEnv.length === 0;
 
@@ -153,7 +157,10 @@ export function LoginForm({ missingEnv }: { missingEnv: string[] }) {
           <Form layout="vertical" onFinish={() => void verifyCode()}>
             <Form.Item
               label={tt('الرمز المكوّن من ٦ أرقام', '6-digit code')}
-              help={tt(`أُرسل إلى ${email}`, `Sent to ${email}`)}
+              help={tt(
+                `أُرسل إلى ${email}. إن وصلك رابط بدل الرمز، اضغط عليه مباشرة.`,
+                `Sent to ${email}. If the email contains a link instead of a code, just click it.`,
+              )}
               required
             >
               <Input
