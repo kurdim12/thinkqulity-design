@@ -9,7 +9,8 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "seed": "node --env-file=.env.local --experimental-strip-types scripts/seed.ts",
-    "doctor": "node --env-file=.env.local scripts/doctor.mjs"
+    "doctor": "node --env-file=.env.local scripts/doctor.mjs",
+    "login": "node --env-file=.env.local scripts/login-link.mjs"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.2",

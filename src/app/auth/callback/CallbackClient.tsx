@@ -34,6 +34,17 @@ export function CallbackClient() {
     if (started.current) return;
     started.current = true;
 
+    // A spinner that never resolves is the worst failure mode here: the session
+    // may well be fine and the user has no way to tell. Always land somewhere.
+    const watchdog = setTimeout(() => {
+      setError(
+        tt(
+          'تعذّر إتمام تسجيل الدخول في الوقت المتوقّع. اطلب رابطًا جديدًا.',
+          'Sign-in did not complete in time. Request a new link.',
+        ),
+      );
+    }, 12_000);
+
     void (async () => {
       const supabase = supabaseBrowser();
 
@@ -54,7 +65,15 @@ export function CallbackClient() {
           return;
         }
 
-        if (accessToken && refreshToken) {
+        // supabase-js parses the fragment during construction
+        // (detectSessionInUrl) and establishes the session itself. Ask first:
+        // calling setSession on top of that contends for the same auth lock and
+        // can hang forever, leaving a spinner over a session that already works.
+        const { data: existing } = await supabase.auth.getSession();
+
+        if (existing.session) {
+          // Nothing to do — supabase-js already handled it.
+        } else if (accessToken && refreshToken) {
           const { error: sessionError } = await supabase.auth.setSession({
             access_token: accessToken,
             refresh_token: refreshToken,
@@ -70,19 +89,13 @@ export function CallbackClient() {
           });
           if (otpError) throw new Error(otpError.message);
         } else {
-          // supabase-js parses the fragment on init (detectSessionInUrl) and
-          // may already have consumed it, leaving nothing for us to read. A
-          // live session means the link worked — don't call that a failure.
-          const { data } = await supabase.auth.getSession();
-          if (!data.session) {
-            setError(
-              tt(
-                'هذا الرابط لا يحتوي على رمز دخول. اطلب رابطًا جديدًا.',
-                'That link carries no sign-in token. Request a new one.',
-              ),
-            );
-            return;
-          }
+          setError(
+            tt(
+              'هذا الرابط لا يحتوي على رمز دخول. اطلب رابطًا جديدًا.',
+              'That link carries no sign-in token. Request a new one.',
+            ),
+          );
+          return;
         }
 
         // Session exists — but a session is not the same as being an operator.
@@ -99,8 +112,12 @@ export function CallbackClient() {
         router.refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Sign-in failed.');
+      } finally {
+        clearTimeout(watchdog);
       }
     })();
+
+    return () => clearTimeout(watchdog);
   }, [params, router, tt]);
 
   return (
