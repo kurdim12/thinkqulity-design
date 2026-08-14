@@ -38,10 +38,13 @@ export async function POST(request: Request) {
       ? input.profiles.filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
       : (optionalEnv('APIFY_PROFILES')?.split(/[,\s]+/).filter(Boolean) ?? DEFAULT_PROFILES);
 
+    // Apify bills per result, so this is deliberately explicit rather than
+    // unbounded — but it goes high enough for a full-history backfill.
+    const MAX_RESULTS = 5000;
     const limit =
-      typeof input.limit === 'number' && input.limit > 0 && input.limit <= 200
+      typeof input.limit === 'number' && input.limit > 0 && input.limit <= MAX_RESULTS
         ? Math.floor(input.limit)
-        : 50;
+        : 200;
 
     if (profiles.length === 0) {
       throw new HttpError(400, 'No Instagram profiles to monitor.');
