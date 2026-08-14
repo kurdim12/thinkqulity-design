@@ -12,6 +12,10 @@ export type EnvKey =
   | 'ALLOWED_EMAILS'
   // Optional. 'anthropic' | 'openrouter'; inferred from whichever key is set.
   | 'AI_PROVIDER'
+  // Optional. Automated Instagram monitoring via Apify. Read-only.
+  | 'APIFY_TOKEN'
+  | 'APIFY_ACTOR'
+  | 'APIFY_PROFILES'
   // Optional overrides — the two model tiers behind the header quality switch.
   | 'AI_MODEL_STANDARD'
   | 'AI_MODEL_QUALITY'

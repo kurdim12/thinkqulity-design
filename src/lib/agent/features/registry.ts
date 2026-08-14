@@ -2,6 +2,7 @@ import type { RunnableFeature } from './types';
 import { conceptsFeature } from './concepts';
 import { campaignFeature } from './campaign';
 import { reportFeature } from './report';
+import { gapsFeature } from './gaps';
 
 /**
  * Every agent capability, resolved by `/api/generate/[feature]`.
@@ -12,6 +13,7 @@ export const FEATURES: readonly RunnableFeature[] = [
   conceptsFeature,
   campaignFeature,
   reportFeature,
+  gapsFeature,
 ];
 
 export function getFeature(id: string): RunnableFeature | undefined {

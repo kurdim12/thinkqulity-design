@@ -43,6 +43,41 @@ export const reportResponseSchema = z.object({
   body_md: z.string().min(1),
 });
 
+/** Gap analysis: what the account is missing, each finding traceable. */
+export const gapsResponseSchema = z.object({
+  warnings: z.array(z.string()),
+  summary_ar: z.string().min(1),
+  gaps: z
+    .array(
+      z.object({
+        title_ar: z.string().min(1),
+        kind: z.enum(['content', 'format', 'audience', 'positioning', 'consistency', 'conversion']),
+        evidence: z.string().min(1),
+        grounding,
+        severity: z.enum(['high', 'medium', 'low']),
+        recommendation_ar: z.string().min(1),
+        suggested_pillar: z.string().nullable(),
+      }),
+    )
+    .min(1),
+});
+
+export type GapsResponse = z.infer<typeof gapsResponseSchema>;
+
+export const GAPS_SCHEMA_TEXT = `{
+  "warnings": ["string"],
+  "summary_ar": "string  // two or three sentences, Arabic",
+  "gaps": [{
+    "title_ar": "string",
+    "kind": "content|format|audience|positioning|consistency|conversion",
+    "evidence": "string  // cite the snapshot field, pillar or knowledge source this rests on",
+    "grounding": "data|hypothesis",
+    "severity": "high|medium|low",
+    "recommendation_ar": "string",
+    "suggested_pillar": "string | null"
+  }]
+}`;
+
 /** Pillar clustering: the model groups posts, the app does the arithmetic. */
 export const pillarClusterSchema = z.object({
   warnings: z.array(z.string()),
