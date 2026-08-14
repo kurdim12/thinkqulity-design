@@ -12,7 +12,15 @@ export interface SnapshotResult {
     new_since_previous: number;
     duplicates_skipped: number;
     unroutable_skipped: number;
+    profiles_skipped: number;
+    unrecognised_skipped: number;
   };
+  /**
+   * One readable line per skip reason, straight from the parser. Surfaced so a
+   * dropped item is visible to whoever ran the ingest instead of only living in
+   * raw_meta — a scrape once lost 12 items with nothing said about it.
+   */
+  warnings: string[];
   files: string[];
 }
 
@@ -62,6 +70,7 @@ export async function createSnapshotFrom(
         files: files.map((f) => f.name),
         usernames: parsed.usernames,
         skipped: parsed.skipped,
+        warnings: parsed.warnings,
         source,
         ingested_at: new Date().toISOString(),
       },
@@ -87,6 +96,24 @@ export async function createSnapshotFrom(
     engagement: post.engagement,
     posted_at: post.posted_at,
     rank: index + 1,
+    // --- 0002_v3_ingestion: fields the actor returned all along. Absent ones
+    // are null, never 0 — an unknown play count is unknown (hard rule 2).
+    video_play_count: post.video_play_count,
+    video_view_count: post.video_view_count,
+    video_duration: post.video_duration,
+    product_type: post.product_type,
+    location_name: post.location_name,
+    location_id: post.location_id,
+    hashtags: post.hashtags,
+    mentions: post.mentions,
+    first_comment: post.first_comment,
+    owner_username: post.owner_username,
+    owner_id: post.owner_id,
+    is_sponsored: post.is_sponsored,
+    dimensions: post.dimensions,
+    // Hard rule 8: the complete item is stored, so a field this mapping does
+    // not surface yet is re-processable without re-scraping.
+    raw: post.raw,
   }));
 
   const { data: insertedPosts, error: postsError } = await db
@@ -109,7 +136,10 @@ export async function createSnapshotFrom(
       new_since_previous: newPostCount,
       duplicates_skipped: parsed.skipped.duplicates,
       unroutable_skipped: parsed.skipped.unroutable,
+      profiles_skipped: parsed.skipped.profiles,
+      unrecognised_skipped: parsed.skipped.unrecognised,
     },
+    warnings: parsed.warnings,
     files: files.map((f) => f.name),
   };
 }

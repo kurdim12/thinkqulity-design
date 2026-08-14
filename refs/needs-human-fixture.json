@@ -1,0 +1,87 @@
+{
+  "_readme": "Test fixture, NOT Canon. Do not run ingest:canon on this file — it is a deliberately bad brand guideline, used by tests/needs-human.test.ts to drive the Law -> Judge -> one-retry cycle in src/lib/agent/features/types.ts down its needs_human branch. It is shaped exactly like the `guideline` feature's response schema, so the real schema validates it.",
+
+  "why_this_fixture_exists": "needs_human is only reachable when the SECOND review still fails. If the fixture broke a Law rule, the failure would come from runLaw + reconcile (the deterministic half) and would prove the wrong branch — reconcile forces `fail` mechanically whenever lawReport.violations is non-empty. This fixture is engineered to pass every deterministic check so that the only thing left that can fail it is the Judge.",
+
+  "law_checks_it_is_built_to_survive": {
+    "guideline-structure": "All eight mandatory sections present, every line carries a non-empty source, no section empty.",
+    "palette-claims": "The only hex values named (#48C0C0, #181818, #F0F0F0) are real entries in the sampled palette.",
+    "claims-linter": "No metric claim is made. The one number the linter picks up is 181818, from the hex, and it appears in the brand palette inside the rendered context.",
+    "register-score": "May score low and return a WARNING. Warnings never veto — LawReport.passed is driven by violations only — so this does not make the failure Law-visible."
+  },
+
+  "canon_rule_it_breaks": "refs/guideline-anatomy.md, section «What every section owes the reader»: “A rule, a reason, and an example. A rule without a reason gets broken the first time it is inconvenient.” The same document's Voice section: real examples of the brand's own words, “not adjectives about them”. Every line below is an adjective or a bare rule, correctly sourced, with no reason and no example behind it.",
+
+  "why_the_law_cannot_see_it": "No deterministic check in src/lib/brain/law/ inspects whether a line reasons or exemplifies. guideline-structure asserts a source string exists; it cannot assert the source is load-bearing. Judging «الصوت دافئ وموثوق» against «carries real examples, not adjectives» is a reading of the text against a retrieved passage — that is the Judge's job, and by rule 7 it must never become the Law's.",
+
+  "expected_sequence": [
+    "attempt 1: generate -> runLaw passes clean -> runJudge FAILS, citing canon:<chunk_id>",
+    "retry: the violations are fed back verbatim; the model returns the same unreasoned rules",
+    "attempt 2: runLaw passes clean -> runJudge FAILS again",
+    "BrainReport.needsHuman = true, attempts = 2, and persist() surfaces needs_human: true"
+  ],
+
+  "live_run_status": "The sequence above has NOT been observed against a real model. OPENROUTER_API_KEY and ANTHROPIC_API_KEY are present in .env.local as empty placeholders, which optionalEnv() reads as absent, so no generation or judgement can run. tests/needs-human.test.ts asserts the cycle itself with a scripted judge, so the branch is genuinely executed; whether a real Judge fails this fixture twice is a claim that still needs a key to test.",
+
+  "candidate": {
+    "warnings": [],
+    "sections": [
+      {
+        "key": "positioning",
+        "title_ar": "التموضع",
+        "lines": [
+          { "text": "أكاديمية تدريب رائدة ومتميزة في مجال الجودة.", "source": "brand.facts: positioning" }
+        ]
+      },
+      {
+        "key": "audience",
+        "title_ar": "الجمهور",
+        "lines": [
+          { "text": "الفئة المستهدفة هي شريحة المهنيين والموظفين.", "source": "brand.audience_notes" }
+        ]
+      },
+      {
+        "key": "voice",
+        "title_ar": "الصوت",
+        "lines": [
+          { "text": "الصوت دافئ وموثوق ومهني.", "source": "brand.voice_examples" }
+        ]
+      },
+      {
+        "key": "color",
+        "title_ar": "اللون",
+        "lines": [
+          { "text": "الألوان المعتمدة: #48C0C0 و #181818 و #F0F0F0.", "source": "brand.palette — sampled, not chosen" }
+        ]
+      },
+      {
+        "key": "typography",
+        "title_ar": "الطباعة",
+        "lines": [
+          { "text": "الخط واضح ومقروء ويستخدم في كل المواد.", "source": "brand.typography" }
+        ]
+      },
+      {
+        "key": "logo_usage",
+        "title_ar": "استخدام الشعار",
+        "lines": [
+          { "text": "يوضع الشعار بشكل صحيح ومناسب في كل تصميم.", "source": "brand.assets" }
+        ]
+      },
+      {
+        "key": "social",
+        "title_ar": "السوشيال ميديا",
+        "lines": [
+          { "text": "المنشورات جذابة ومتناسقة مع الهوية.", "source": "brand.facts: social" }
+        ]
+      },
+      {
+        "key": "arabic_specific",
+        "title_ar": "العربية",
+        "lines": [
+          { "text": "يدعم التصميم الاتجاه من اليمين إلى اليسار.", "source": "brand.facts: rtl" }
+        ]
+      }
+    ]
+  }
+}

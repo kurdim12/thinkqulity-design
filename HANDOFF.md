@@ -27,8 +27,13 @@ GitHub repo. Keep that boundary. Check `git check-ignore` before adding anything
 **Think Quality Academy** — Ahmad Kahtan, Amman, Jordan. Training and soft-skills
 academy. Two Instagram accounts:
 
-- **personal** (`@ahmad.kahtan`) — ~84.5K followers, avg engagement **508/post**
-- **academy** (`@thinkquality.academy`) — avg engagement **40/post**
+- **personal** (`@ahmadkahtan_`) — followers **—**, avg engagement **508/post**. The "~84.5K"
+  in the brief is not a measurement: it is a `brand.facts` string sourced `seed-2026-06`,
+  and `snapshots.stats.followers` is `{personal: null, academy: null}` because the post
+  export does not carry follower counts. The Dashboard renders the em-dash rather than
+  falling back to the seed string — do not quote 84.5K as a fact. Run the profile scrape
+  on `/data` and the number becomes a dated row in `profile_snapshots`.
+- **academy** (`@thinkquality_academyy`) — avg engagement **40/post**
 
 His personal voice outperforms the brand account roughly **13×**. That gap is the
 product's entire reason to exist and the opening beat of the demo. Top post is

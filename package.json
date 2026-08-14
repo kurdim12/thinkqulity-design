@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types tests/law.test.ts",
+    "test": "node --test --experimental-strip-types tests/*.test.ts",
     "seed": "node --env-file=.env.local --experimental-strip-types scripts/seed.ts",
     "doctor": "node --env-file=.env.local scripts/doctor.mjs",
     "login": "node --env-file=.env.local scripts/login-link.mjs",

@@ -5,6 +5,7 @@ import { reportFeature } from './report';
 import { gapsFeature } from './gaps';
 import { guidelineFeature } from './guideline';
 import { storyboardFeature } from './storyboard';
+import { audienceFeature } from './audience';
 
 /**
  * Every agent capability, resolved by `/api/generate/[feature]`.
@@ -18,6 +19,7 @@ export const FEATURES: readonly RunnableFeature[] = [
   gapsFeature,
   guidelineFeature,
   storyboardFeature,
+  audienceFeature,
 ];
 
 export function getFeature(id: string): RunnableFeature | undefined {

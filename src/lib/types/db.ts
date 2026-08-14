@@ -107,6 +107,22 @@ export interface PostRow {
   engagement: number;
   posted_at: string | null;
   rank: number | null;
+  // --- 0002_v3_ingestion: fields the actor already returned and v1 dropped ---
+  video_play_count: number | null;
+  video_view_count: number | null;
+  video_duration: number | null;
+  product_type: string | null;
+  location_name: string | null;
+  location_id: string | null;
+  hashtags: string[] | null;
+  mentions: string[] | null;
+  first_comment: string | null;
+  owner_username: string | null;
+  owner_id: string | null;
+  is_sponsored: boolean | null;
+  dimensions: Record<string, unknown> | null;
+  /** The scraper item, untouched. Hard rule 8: raw is sacred. */
+  raw: Record<string, unknown> | null;
 }
 
 export interface PillarRow {
@@ -194,4 +210,129 @@ export interface AgentConcept {
   why: string;
   grounding: Grounding;
   needs_calibration: boolean;
+}
+
+/* ===========================================================================
+ * v3 ingestion — mirrors supabase/migrations/0002_v3_ingestion.sql.
+ * =========================================================================== */
+
+export type ScrapeKind = 'posts' | 'profile' | 'comments' | 'monitor';
+
+/**
+ * One ledgered scrape run. Written BEFORE the actor is called, so a blocked or
+ * failed run leaves a trace with its estimate. `estimated_usd` is null when the
+ * actor's published rate could not be verified — null means "not estimated",
+ * never "free". See src/lib/ingest/budget.ts.
+ */
+export interface ScrapeRunRow {
+  id: string;
+  kind: ScrapeKind;
+  actor: string;
+  /** The actor input, verbatim. */
+  input: Record<string, unknown>;
+  estimated_usd: number | null;
+  actual_results: number | null;
+  /** 'done' | 'blocked' | 'error' by convention; the column has no check. */
+  status: string;
+  /** Storage path of the complete raw payload. Hard rule 8: raw is sacred. */
+  raw_path: string | null;
+  created_at: string;
+}
+
+/**
+ * Profile-level history, one row per account per day. Follower counts live
+ * here rather than in snapshots.stats because the post scraper does not
+ * reliably return them.
+ */
+export interface ProfileSnapshotRow {
+  id: string;
+  account: Account;
+  /** ISO date, `YYYY-MM-DD`. Always produced by toIsoDate(). */
+  taken_on: string;
+  followers: number | null;
+  following: number | null;
+  posts_count: number | null;
+  bio: string | null;
+  external_url: string | null;
+  is_verified: boolean | null;
+  raw: Record<string, unknown>;
+}
+
+/**
+ * One stored comment. Hard rule 10: commenters are an audience, not targets —
+ * `author_handle` exists for dedupe and raw fidelity, and nothing downstream
+ * builds a per-commenter profile or tracking surface from it.
+ */
+export interface CommentRow {
+  id: string;
+  post_id: string | null;
+  ig_comment_id: string;
+  author_handle: string | null;
+  text_content: string;
+  likes: number | null;
+  posted_at: string | null;
+  raw: Record<string, unknown>;
+}
+
+/** A recurring subject in the comment corpus, evidenced by real quotes. */
+export interface AudienceTheme {
+  label: string;
+  /** How many comments fall in this theme. Always shown next to the label. */
+  n: number;
+  quotes: { text: string; post_id: string; post_url: string | null }[];
+  grounding: Grounding;
+}
+
+/** A question the audience actually asked, with the post it was asked under. */
+export interface AudienceQuestion {
+  text: string;
+  post_id: string;
+  post_url: string | null;
+  /** Times this question (or a near-duplicate) was asked. */
+  asked_count: number;
+}
+
+/**
+ * One hour x weekday bucket of the posting-time grid. `avg_engagement` is null
+ * when n is 0 — an empty bucket renders as an em-dash, never 0 (hard rule 2).
+ */
+export interface TimingCell {
+  /** 0–23, in the timezone the report was computed in. */
+  hour: number;
+  /** 0 = Sunday, matching dayjs `.day()`. */
+  weekday: number;
+  n: number;
+  avg_engagement: number | null;
+}
+
+/**
+ * Posting-time patterns computed IN CODE from posted_at x engagement — never
+ * asserted by a model (hard rule 11). Every window carries its own n.
+ */
+export interface TimingReport {
+  cells: TimingCell[];
+  best_windows: {
+    label: string;
+    /** Inclusive start hour, exclusive end hour. */
+    hours: [number, number];
+    n: number;
+    avg_engagement: number;
+    /** avg_engagement / overall_avg, e.g. 2.1. */
+    multiple_vs_overall: number;
+  }[];
+  overall_avg: number;
+  total_n: number;
+  account: Account | 'all';
+}
+
+/** Aggregate audience findings derived from one scrape run. */
+export interface AudienceInsightRow {
+  id: string;
+  generated_from: string | null;
+  themes: AudienceTheme[];
+  questions: AudienceQuestion[];
+  register_notes: string | null;
+  timing: TimingReport | null;
+  grounding: Grounding;
+  created_at: string;
 }

@@ -5,6 +5,7 @@ import { readQuality } from '@/lib/prefs.server';
 import { runAgentJson } from '@/lib/agent/client';
 import { pillarClusterSchema, PILLAR_SCHEMA_TEXT } from '@/lib/agent/schemas';
 import { computeDiff, instagramShortcode } from '@/lib/snapshots';
+import { scanCoverage, MAX_POSTS_SCAN } from '@/lib/audience/posts';
 import type {
   BrandFact,
   BrandRow,
@@ -16,6 +17,27 @@ import type {
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 120;
+
+/* --------------------------------------------------------- what is read -- */
+
+/**
+ * Neither read of `posts` in this route returns a post to the client — step 3
+ * sends a caption excerpt to the model and step 4 matches URLs — so both select
+ * exactly their own columns and nothing else.
+ *
+ * They were `select('*')`. Migration 0002 added `posts.raw`, the complete Apify
+ * item, with `addParentData: true` embedding the parent profile blob in every
+ * one of them. A star select therefore drags the entire scrape payload of every
+ * post through this route the moment a monitor run has written it — into a model
+ * prompt's neighbourhood in step 3, and into a Map that only ever reads two
+ * scalars in step 4. Both are `Pick<PostRow, …>` so the shapes stay tied to the
+ * table's own type instead of drifting from it.
+ */
+type PillarPostRow = Pick<PostRow, 'id' | 'account' | 'engagement' | 'media_type' | 'caption'>;
+const PILLAR_POST_COLUMNS = 'id, account, engagement, media_type, caption';
+
+type ShippedMatchRow = Pick<PostRow, 'id' | 'url' | 'engagement'>;
+const SHIPPED_MATCH_COLUMNS = 'id, url, engagement';
 
 /** Replaces facts with the same key, keeps everything else, never drops seeds. */
 function mergeFacts(existing: BrandFact[], incoming: BrandFact[]): BrandFact[] {
@@ -119,11 +141,11 @@ export async function POST() {
     // ---- 3. Pillars --------------------------------------------------------
     const { data: postRows } = await db
       .from('posts')
-      .select('*')
+      .select(PILLAR_POST_COLUMNS)
       .eq('snapshot_id', latest.id)
       .order('rank', { ascending: true })
       .limit(40);
-    const posts = (postRows as PostRow[] | null) ?? [];
+    const posts = (postRows as PillarPostRow[] | null) ?? [];
 
     let pillarsWritten = 0;
     const pillarWarnings: string[] = [];
@@ -164,7 +186,7 @@ export async function POST() {
         .map((pillar) => {
           const members = pillar.post_ids
             .map((id) => byId.get(id))
-            .filter((p): p is PostRow => p !== undefined);
+            .filter((p): p is PillarPostRow => p !== undefined);
           if (members.length === 0) return null;
           const total = members.reduce((sum, p) => sum + p.engagement, 0);
           return {
@@ -208,9 +230,29 @@ export async function POST() {
       .not('shipped_url', 'is', null);
     const shipped = (shippedRows as ConceptRow[] | null) ?? [];
 
-    const { data: allPostRows } = await db.from('posts').select('*').eq('snapshot_id', latest.id);
-    const allPosts = (allPostRows as PostRow[] | null) ?? [];
-    const byShortcode = new Map<string, PostRow>();
+    /**
+     * The index every `unmatched` verdict below is decided against.
+     *
+     * It had no ceiling. MAX_POSTS_SCAN is the cap the other full-population
+     * reads of `posts` state, and `rank` ascending makes the prefix
+     * deterministic and useful — a truncated index holds the loudest posts, the
+     * ones a shipped concept is most likely to be.
+     *
+     * `posts` is UNIQUE (snapshot_id, ig_id) and this filters on one snapshot,
+     * so the rows are one-per-post by construction and no dedupe is needed. The
+     * Map still collapses on shortcode, which is a different key: two rows can
+     * carry URLs for the same shortcode, and last-write-wins there is unchanged
+     * behaviour.
+     */
+    const { data: allPostRows } = await db
+      .from('posts')
+      .select(SHIPPED_MATCH_COLUMNS)
+      .eq('snapshot_id', latest.id)
+      .order('rank', { ascending: true })
+      .limit(MAX_POSTS_SCAN);
+    const allPosts = (allPostRows as ShippedMatchRow[] | null) ?? [];
+    const indexCoverage = scanCoverage(allPosts.length, MAX_POSTS_SCAN);
+    const byShortcode = new Map<string, ShippedMatchRow>();
     for (const post of allPosts) {
       const code = instagramShortcode(post.url);
       if (code) byShortcode.set(code, post);
@@ -240,7 +282,23 @@ export async function POST() {
       facts_updated: observed.length,
       pillars_written: pillarsWritten,
       pillar_warnings: pillarWarnings,
-      shipped: { backfilled, unmatched },
+      shipped: {
+        backfilled,
+        unmatched,
+        /**
+         * What the shortcode index above actually covered — additive, so the
+         * existing `backfilled` / `unmatched` contract is untouched.
+         *
+         * It matters because `unmatched` is an assertion about absence, and a
+         * capped read cannot make one. When `truncated` is true the index is a
+         * prefix of the snapshot, so a title listed there may be a post that
+         * exists beyond the cap rather than a post that does not exist. The
+         * Data screen tells the operator to "check the Instagram link" on the
+         * strength of that list; it needs to be able to see when the list is
+         * only provisional.
+         */
+        population: indexCoverage,
+      },
     });
   } catch (err) {
     return errorResponse(err);

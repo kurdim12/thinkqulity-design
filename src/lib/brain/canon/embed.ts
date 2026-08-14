@@ -1,4 +1,4 @@
-import { optionalEnv, requireEnv } from '@/lib/env';
+import { hasEnv, optionalEnv, requireEnv } from '@/lib/env';
 
 /**
  * Pluggable embeddings.
@@ -17,12 +17,67 @@ export type EmbeddingProvider = 'local' | 'openai';
 
 export const LOCAL_DIM = 384;
 
+/** The dimension text-embedding-3-small returns. Declared, never measured here. */
+const OPENAI_DEFAULT_DIM = 1536;
+
+const OPENAI_DEFAULT_MODEL = 'text-embedding-3-small';
+
+export interface EmbeddingMode {
+  /** What will actually run. */
+  provider: EmbeddingProvider;
+  /** What EMBEDDING_PROVIDER asked for, which is not always what runs. */
+  requested: EmbeddingProvider;
+  dimension: number;
+  /** Why `provider` is what it is, in one line, for logs and /api/canon. */
+  reason: string;
+}
+
+/**
+ * Resolves the embedder once, so every caller reports the mode that actually
+ * runs rather than the one that was asked for.
+ *
+ * `openai` needs a key. Without one, the request degrades to the keyless local
+ * embedder and says so — an app that claims 1536-dimension OpenAI vectors while
+ * every embed call throws is worse than one that admits it is running local,
+ * because the operator reads the claim and stops looking.
+ */
+export function embeddingMode(): EmbeddingMode {
+  const requested: EmbeddingProvider =
+    optionalEnv('EMBEDDING_PROVIDER')?.toLowerCase() === 'openai' ? 'openai' : 'local';
+
+  if (requested === 'openai' && !hasEnv('OPENAI_API_KEY')) {
+    return {
+      provider: 'local',
+      requested,
+      dimension: LOCAL_DIM,
+      reason: 'EMBEDDING_PROVIDER=openai but OPENAI_API_KEY is not set — fell back to local.',
+    };
+  }
+
+  if (requested === 'openai') {
+    const model = optionalEnv('EMBEDDING_MODEL') ?? OPENAI_DEFAULT_MODEL;
+    return {
+      provider: 'openai',
+      requested,
+      dimension: OPENAI_DEFAULT_DIM,
+      reason: `EMBEDDING_PROVIDER=openai, key present, model ${model}.`,
+    };
+  }
+
+  return {
+    provider: 'local',
+    requested,
+    dimension: LOCAL_DIM,
+    reason: 'EMBEDDING_PROVIDER unset or local — keyless local embedder.',
+  };
+}
+
 export function embeddingProvider(): EmbeddingProvider {
-  return optionalEnv('EMBEDDING_PROVIDER')?.toLowerCase() === 'openai' ? 'openai' : 'local';
+  return embeddingMode().provider;
 }
 
 export function embeddingDimension(): number {
-  return embeddingProvider() === 'openai' ? 1536 : LOCAL_DIM;
+  return embeddingMode().dimension;
 }
 
 /** FNV-1a — small, fast, and stable across runs, which matters for a store. */
@@ -55,7 +110,7 @@ function localEmbed(text: string): number[] {
 }
 
 async function openaiEmbed(texts: string[]): Promise<number[][]> {
-  const model = optionalEnv('EMBEDDING_MODEL') ?? 'text-embedding-3-small';
+  const model = optionalEnv('EMBEDDING_MODEL') ?? OPENAI_DEFAULT_MODEL;
   const response = await fetch('https://api.openai.com/v1/embeddings', {
     method: 'POST',
     headers: {

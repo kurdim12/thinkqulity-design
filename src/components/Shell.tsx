@@ -16,6 +16,7 @@ import {
   UserOutlined,
   ThunderboltOutlined,
   TableOutlined,
+  TeamOutlined,
   ReadOutlined,
   SafetyCertificateOutlined,
 } from '@ant-design/icons';
@@ -43,6 +44,9 @@ export function Shell({ email, children }: { email: string; children: React.Reac
     { key: '/calendar', icon: <CalendarOutlined />, label: t.nav.calendar },
     { key: '/reports', icon: <FileTextOutlined />, label: t.nav.reports },
     { key: '/board', icon: <TableOutlined />, label: t.nav.board },
+    // Labelled inline rather than from dict.ts: the dictionary is shared with
+    // other work in flight, and this screen needs exactly one new string.
+    { key: '/audience', icon: <TeamOutlined />, label: tt('الجمهور', 'Audience') },
     { key: '/guideline', icon: <ReadOutlined />, label: t.nav.guideline },
     { key: '/compliance', icon: <SafetyCertificateOutlined />, label: t.nav.compliance },
     { key: '/settings', icon: <SettingOutlined />, label: t.nav.settings },

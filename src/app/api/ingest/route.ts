@@ -1,9 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireOperator, errorResponse, HttpError } from '@/lib/auth';
-import { supabaseAdmin } from '@/lib/supabase/admin';
-import { parseApifyExports } from '@/lib/ingest/apify';
-import { computeDiff, todayIso } from '@/lib/snapshots';
-import type { PostRow, SnapshotRow } from '@/lib/types/db';
+import { createSnapshotFrom } from '@/lib/ingest/snapshot';
+import { todayIso } from '@/lib/snapshots';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -15,6 +13,27 @@ export const maxDuration = 60;
  *
  * Produces exactly one snapshot plus its ranked posts. Rejects non-Apify
  * shapes with a message the Data screen can show verbatim.
+ *
+ * THIS ROUTE OWNS THE UPLOAD, NOT THE SNAPSHOT. Everything below reads the
+ * multipart body and turns it into `{ name, payload }[]`; the snapshot itself is
+ * built by createSnapshotFrom(), the same call /api/monitor makes.
+ *
+ * It used to own a hand-copied duplicate of that logic instead, and the copy
+ * stopped being updated at migration 0002. Three guarantees were missing from
+ * every hand-uploaded snapshot as a result, and none of them were visible from
+ * this file:
+ *   - `posts.raw` was never written, so hard rule 8 did not hold on this path —
+ *     an upload was mapped and the complete item discarded.
+ *   - none of the 0002 v3 columns were written, so `first_comment`,
+ *     `video_play_count` and `owner_username` were null for uploaded data and
+ *     the Board widgets that read them could only ever render an em-dash.
+ *   - `parsed.warnings` was dropped, so a skipped item left no trace — the
+ *     silent-loss guarantee that exists because a scrape once lost 12 items
+ *     without saying so.
+ *
+ * The parameterisation the two callers genuinely need is the `source` argument,
+ * which is the only thing that differs: 'upload' here, 'monitor' there. It lands
+ * in `snapshots.raw_meta.source`, so a row records which gesture produced it.
  */
 export async function POST(request: Request) {
   try {
@@ -49,91 +68,15 @@ export async function POST(request: Request) {
       }
     }
 
-    const parsed = parseApifyExports(files);
-    const db = supabaseAdmin();
-
-    const { data: prevRows, error: prevError } = await db
-      .from('snapshots')
-      .select('*')
-      .order('taken_on', { ascending: false })
-      .limit(1);
-    if (prevError) throw new Error(`Could not read previous snapshots: ${prevError.message}`);
-
-    const previous = (prevRows?.[0] as SnapshotRow | undefined) ?? null;
-
-    let newPostCount = parsed.posts.length;
-    if (previous) {
-      const { data: knownIds } = await db
-        .from('posts')
-        .select('ig_id')
-        .eq('snapshot_id', previous.id);
-      const known = new Set((knownIds ?? []).map((r) => (r as { ig_id: string }).ig_id));
-      newPostCount = parsed.posts.filter((p) => !known.has(p.ig_id)).length;
-    }
-
-    const stats = {
-      ...parsed.stats,
-      diff_vs_prev: previous ? computeDiff(previous, parsed.stats, newPostCount) : null,
-    };
-
-    const { data: snapshotRow, error: snapshotError } = await db
-      .from('snapshots')
-      .insert({
-        taken_on: takenOn,
-        stats,
-        raw_meta: {
-          files: files.map((f) => f.name),
-          usernames: parsed.usernames,
-          skipped: parsed.skipped,
-          ingested_at: new Date().toISOString(),
-        },
-      })
-      .select('*')
-      .single();
-
-    if (snapshotError || !snapshotRow) {
-      throw new Error(`Could not create the snapshot: ${snapshotError?.message ?? 'unknown error'}`);
-    }
-
-    const snapshot = snapshotRow as SnapshotRow;
-
-    const postRows = parsed.posts.map((post, index) => ({
-      snapshot_id: snapshot.id,
-      account: post.account,
-      ig_id: post.ig_id,
-      url: post.url,
-      caption: post.caption,
-      media_type: post.media_type,
-      likes: post.likes,
-      comments: post.comments,
-      engagement: post.engagement,
-      posted_at: post.posted_at,
-      rank: index + 1,
-    }));
-
-    const { data: insertedPosts, error: postsError } = await db
-      .from('posts')
-      .insert(postRows)
-      .select('id');
-
-    if (postsError) {
-      // Don't leave a snapshot with no posts behind.
-      await db.from('snapshots').delete().eq('id', snapshot.id);
-      throw new Error(`Could not save posts: ${postsError.message}`);
-    }
-
-    return NextResponse.json({
-      snapshot,
-      counts: {
-        posts: (insertedPosts as Pick<PostRow, 'id'>[] | null)?.length ?? postRows.length,
-        personal: parsed.stats.post_count.personal,
-        academy: parsed.stats.post_count.academy,
-        new_since_previous: newPostCount,
-        duplicates_skipped: parsed.skipped.duplicates,
-        unroutable_skipped: parsed.skipped.unroutable,
-      },
-      files: files.map((f) => f.name),
-    });
+    /**
+     * SnapshotResult is returned whole. Its `snapshot`, `counts` and `files`
+     * members are exactly the contract this route already had, with the same
+     * names and types, so the Data screen keeps working untouched. It adds
+     * `warnings`, `counts.profiles_skipped` and `counts.unrecognised_skipped` —
+     * additive, and the first of those is the whole point: a dropped item is now
+     * something this response can show instead of something only raw_meta knows.
+     */
+    return NextResponse.json(await createSnapshotFrom(files, takenOn, 'upload'));
   } catch (err) {
     return errorResponse(err);
   }

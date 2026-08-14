@@ -1,4 +1,5 @@
 import { HttpError } from '@/lib/auth';
+import { accountFor, canonicalHandles } from '@/lib/ingest/handles';
 import type { Account, SnapshotStats } from '@/lib/types/db';
 
 /**
@@ -19,29 +20,67 @@ export interface ParsedPost {
   posted_at: string | null;
   owner_username: string | null;
   followers: number | null;
+  /* --- 0002_v3_ingestion: fields the actor returned all along ------------- */
+  video_play_count: number | null;
+  video_view_count: number | null;
+  video_duration: number | null;
+  product_type: string | null;
+  location_name: string | null;
+  location_id: string | null;
+  hashtags: string[] | null;
+  mentions: string[] | null;
+  first_comment: string | null;
+  owner_id: string | null;
+  is_sponsored: boolean | null;
+  dimensions: { height: number | null; width: number | null } | null;
+  /**
+   * The source item, untouched. Hard rule 8: raw is sacred — a field this
+   * parser does not surface yet is still captured, so the whole corpus is
+   * re-processable without paying for another scrape.
+   */
+  raw: Json;
+}
+
+/** The key used when an unroutable item carried no owner username at all. */
+export const UNKNOWN_OWNER = '(no owner username)';
+
+/**
+ * What was in the payload but did not become a post, counted by reason.
+ * `duplicates` and `unroutable` keep the names the Data screen already reads.
+ */
+export interface IngestSkipped {
+  duplicates: number;
+  unroutable: number;
+  /** Owner username → how many of its items were skipped. `UNKNOWN_OWNER` for none. */
+  unroutable_by_username: Record<string, number>;
+  /** Post-shaped items with no id or shortCode to key on. */
+  missing_id: number;
+  /** Profile-shaped items. Real data, just not posts — see ingest/profile.ts. */
+  profiles: number;
+  /** Records that do not look like an Instagram item at all. */
+  unrecognised: number;
 }
 
 export interface IngestParseResult {
   posts: ParsedPost[];
   stats: SnapshotStats;
-  skipped: { duplicates: number; unroutable: number };
+  skipped: IngestSkipped;
   usernames: Record<Account, string[]>;
+  /**
+   * One readable line per non-empty skip reason. A production scrape once lost
+   * 12 items silently; nothing is dropped now without a number attached to it.
+   */
+  warnings: string[];
 }
 
-export interface AccountMapping {
-  personal: string[];
-  academy: string[];
-}
+/**
+ * A decoded JSON object. Exported alongside the accessors below so profile.ts
+ * and comments.ts share one defensive field-reading toolkit instead of each
+ * re-implementing the alias tolerance.
+ */
+export type Json = Record<string, unknown>;
 
-/** Usernames from the seed facts. Lowercase, no leading @. */
-export const DEFAULT_ACCOUNT_MAPPING: AccountMapping = {
-  personal: ['ahmadkahtan_'],
-  academy: ['thinkquality_academyy'],
-};
-
-type Json = Record<string, unknown>;
-
-function isObject(v: unknown): v is Json {
+export function isObject(v: unknown): v is Json {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
@@ -59,7 +98,22 @@ function num(v: unknown): number | null {
   return null;
 }
 
-function pickString(item: Json, keys: string[]): string | null {
+/**
+ * Only a real boolean, or the exact strings "true"/"false", is a boolean.
+ * 0 and 1 are deliberately not coerced: a missing flag must stay unknown
+ * rather than becoming a confident `false` (hard rule 2).
+ */
+function bool(v: unknown): boolean | null {
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'string') {
+    const t = v.trim().toLowerCase();
+    if (t === 'true') return true;
+    if (t === 'false') return false;
+  }
+  return null;
+}
+
+export function pickString(item: Json, keys: string[]): string | null {
   for (const key of keys) {
     const value = str(item[key]);
     if (value) return value;
@@ -67,7 +121,7 @@ function pickString(item: Json, keys: string[]): string | null {
   return null;
 }
 
-function pickNumber(item: Json, keys: string[]): number | null {
+export function pickNumber(item: Json, keys: string[]): number | null {
   for (const key of keys) {
     const value = num(item[key]);
     if (value !== null) return value;
@@ -75,7 +129,55 @@ function pickNumber(item: Json, keys: string[]): number | null {
   return null;
 }
 
-function normaliseUsername(raw: string | null): string | null {
+export function pickBoolean(item: Json, keys: string[]): boolean | null {
+  for (const key of keys) {
+    const value = bool(item[key]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+/**
+ * Tag lists (hashtags, mentions). The first candidate key that holds an array
+ * wins, even when that array is empty — "the actor listed no hashtags" and
+ * "the actor did not report hashtags" are different answers, so the first is
+ * `[]` and the second is `null`.
+ *
+ * Entries are trimmed and de-duplicated, and a single leading `#`/`@` marker is
+ * removed because some actor versions emit "#tag" and others "tag"; the two
+ * must group as one tag. No character class is filtered, so Arabic tags survive
+ * intact, and `raw` keeps the original spelling either way.
+ */
+export function pickStringArray(item: Json, keys: string[]): string[] | null {
+  for (const key of keys) {
+    const value = item[key];
+    if (!Array.isArray(value)) continue;
+    const out: string[] = [];
+    for (const entry of value) {
+      const text = str(entry);
+      if (!text) continue;
+      const cleaned = text.replace(/^[#@]/, '').trim();
+      if (cleaned.length > 0 && !out.includes(cleaned)) out.push(cleaned);
+    }
+    return out;
+  }
+  return null;
+}
+
+/** `dimensionsHeight`/`dimensionsWidth`, or a nested `dimensions` object. */
+function pickDimensions(item: Json): { height: number | null; width: number | null } | null {
+  let height = pickNumber(item, ['dimensionsHeight', 'height']);
+  let width = pickNumber(item, ['dimensionsWidth', 'width']);
+  const nested = item['dimensions'];
+  if (isObject(nested)) {
+    height = height ?? pickNumber(nested, ['height']);
+    width = width ?? pickNumber(nested, ['width']);
+  }
+  if (height === null && width === null) return null;
+  return { height, width };
+}
+
+export function normaliseUsername(raw: string | null): string | null {
   if (!raw) return null;
   return raw.replace(/^@/, '').trim().toLowerCase();
 }
@@ -97,7 +199,7 @@ export function cleanCaption(raw: string | null): string | null {
   return cleaned.length > 0 ? cleaned : null;
 }
 
-function toIso(value: unknown): string | null {
+export function toIso(value: unknown): string | null {
   const raw = str(value) ?? (typeof value === 'number' ? String(value) : null);
   if (!raw) return null;
   // Apify sometimes emits a unix timestamp for `timestamp`.
@@ -108,6 +210,15 @@ function toIso(value: unknown): string | null {
   }
   const d = new Date(raw);
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+/** First candidate key that parses as a timestamp. */
+export function pickIso(item: Json, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = toIso(item[key]);
+    if (value) return value;
+  }
+  return null;
 }
 
 function looksLikeApifyPost(item: unknown): item is Json {
@@ -121,13 +232,55 @@ function looksLikeApifyPost(item: unknown): item is Json {
   return hasId && hasSignal;
 }
 
-/** Flattens whatever top-level shape the export arrived in into a post array. */
+/**
+ * A profile-shaped item: `resultsType=details`, or the parent record the actor
+ * attaches with `addParentData`. It carries a username and profile-only
+ * counters but has no post identity — no shortCode, no ownerUsername, no likes.
+ *
+ * It lives next to looksLikeApifyPost so the two predicates cannot drift apart:
+ * a profile object satisfies looksLikeApifyPost (id + username), and without
+ * this guard it would be counted as a post with no engagement, quietly pulling
+ * every average down.
+ */
+export function looksLikeApifyProfile(item: unknown): item is Json {
+  if (!isObject(item)) return false;
+  if (pickString(item, ['username', 'userName']) === null) return false;
+  const hasProfileSignal =
+    pickNumber(item, ['followersCount', 'followsCount', 'postsCount', 'followers']) !== null ||
+    item['biography'] !== undefined ||
+    Array.isArray(item['latestPosts']);
+  const hasPostSignal =
+    pickString(item, ['shortCode', 'shortcode', 'ownerUsername', 'owner_username']) !== null ||
+    pickNumber(item, ['likesCount', 'likeCount']) !== null;
+  return hasProfileSignal && !hasPostSignal;
+}
+
+/**
+ * Profile exports nest their posts. Those nested arrays used to be dropped on
+ * the floor whenever the top-level payload was itself an array of profiles, so
+ * they are pulled up alongside their parent — the parent is still returned and
+ * still counted, it just no longer hides its own posts.
+ */
+function expandNestedPosts(items: unknown[]): unknown[] {
+  const out: unknown[] = [];
+  for (const item of items) {
+    out.push(item);
+    if (!isObject(item)) continue;
+    for (const key of ['latestPosts', 'posts', 'topPosts']) {
+      const nested = item[key];
+      if (Array.isArray(nested) && nested.some(looksLikeApifyPost)) out.push(...nested);
+    }
+  }
+  return out;
+}
+
+/** Flattens whatever top-level shape the export arrived in into an item array. */
 function collectItems(payload: unknown): unknown[] {
-  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload)) return expandNestedPosts(payload);
   if (isObject(payload)) {
     for (const key of ['items', 'data', 'results', 'posts', 'latestPosts']) {
       const value = payload[key];
-      if (Array.isArray(value)) return value;
+      if (Array.isArray(value)) return expandNestedPosts(value);
     }
     // A profile object with nested posts (Apify profile scraper shape).
     const nested: unknown[] = [];
@@ -135,31 +288,59 @@ function collectItems(payload: unknown): unknown[] {
       if (Array.isArray(value) && value.some(looksLikeApifyPost)) nested.push(...value);
     }
     if (nested.length > 0) return nested;
+    // A single profile object on its own is still a recognisable record.
+    if (looksLikeApifyProfile(payload)) return [payload];
   }
   return [];
-}
-
-function routeAccount(username: string | null, mapping: AccountMapping): Account | null {
-  if (!username) return null;
-  if (mapping.personal.includes(username)) return 'personal';
-  if (mapping.academy.includes(username)) return 'academy';
-  return null;
 }
 
 function emptyByAccount<T>(value: T): Record<Account, T> {
   return { personal: value, academy: value };
 }
 
+/** Turns the skip counters into lines an operator can act on. */
+function describeSkipped(skipped: IngestSkipped): string[] {
+  const warnings: string[] = [];
+
+  if (skipped.unroutable > 0) {
+    const detail = Object.entries(skipped.unroutable_by_username)
+      .sort((a, b) => b[1] - a[1])
+      .map(([username, count]) =>
+        username === UNKNOWN_OWNER ? `${UNKNOWN_OWNER} (${count})` : `@${username} (${count})`,
+      )
+      .join(', ');
+    warnings.push(
+      `${skipped.unroutable} item(s) skipped: owner is not a known account — ${detail}.`,
+    );
+  }
+  if (skipped.missing_id > 0) {
+    warnings.push(`${skipped.missing_id} item(s) skipped: no id or shortCode to key on.`);
+  }
+  if (skipped.profiles > 0) {
+    warnings.push(
+      `${skipped.profiles} profile record(s) in the payload were not counted as posts.`,
+    );
+  }
+  if (skipped.unrecognised > 0) {
+    warnings.push(
+      `${skipped.unrecognised} record(s) skipped: not recognisable as an Instagram item.`,
+    );
+  }
+  if (skipped.duplicates > 0) {
+    warnings.push(`${skipped.duplicates} duplicate post(s) collapsed by ig_id.`);
+  }
+
+  return warnings;
+}
+
 /**
  * Parses one or more Apify JSON exports into a snapshot's worth of posts.
- * Dedupes by ig_id across files, routes by owner username, computes engagement
- * as likes + comments, and ranks descending. Every number here is arithmetic on
- * the export — nothing is estimated.
+ * Dedupes by ig_id across files, routes by owner username through
+ * handles.accountFor, computes engagement as likes + comments, and ranks
+ * descending. Every number here is arithmetic on the export — nothing is
+ * estimated. Every item that does not become a post is counted and reported.
  */
-export function parseApifyExports(
-  files: { name: string; payload: unknown }[],
-  mapping: AccountMapping = DEFAULT_ACCOUNT_MAPPING,
-): IngestParseResult {
+export function parseApifyExports(files: { name: string; payload: unknown }[]): IngestParseResult {
   if (files.length === 0) {
     throw new HttpError(400, 'No files were uploaded.');
   }
@@ -170,8 +351,14 @@ export function parseApifyExports(
     personal: new Set(),
     academy: new Set(),
   };
-  let duplicates = 0;
-  let unroutable = 0;
+  const skipped: IngestSkipped = {
+    duplicates: 0,
+    unroutable: 0,
+    unroutable_by_username: {},
+    missing_id: 0,
+    profiles: 0,
+    unrecognised: 0,
+  };
   let recognisedItems = 0;
 
   for (const file of files) {
@@ -185,23 +372,36 @@ export function parseApifyExports(
     }
 
     for (const item of items) {
-      if (!looksLikeApifyPost(item)) continue;
+      // Profiles are real data, handled by ingest/profile.ts. Counted, not lost.
+      if (looksLikeApifyProfile(item)) {
+        skipped.profiles += 1;
+        continue;
+      }
+      if (!looksLikeApifyPost(item)) {
+        skipped.unrecognised += 1;
+        continue;
+      }
       recognisedItems += 1;
 
       const igId = pickString(item, ['id', 'postId', 'shortCode', 'shortcode', 'code']);
-      if (!igId) continue;
+      if (!igId) {
+        skipped.missing_id += 1;
+        continue;
+      }
 
       const owner = normaliseUsername(
         pickString(item, ['ownerUsername', 'username', 'owner_username', 'ownerName']),
       );
-      const account = routeAccount(owner, mapping);
+      const account = accountFor(owner);
       if (!account) {
-        unroutable += 1;
+        const key = owner ?? UNKNOWN_OWNER;
+        skipped.unroutable += 1;
+        skipped.unroutable_by_username[key] = (skipped.unroutable_by_username[key] ?? 0) + 1;
         continue;
       }
 
       if (seen.has(igId)) {
-        duplicates += 1;
+        skipped.duplicates += 1;
         continue;
       }
       seen.add(igId);
@@ -222,6 +422,21 @@ export function parseApifyExports(
         posted_at: toIso(item['timestamp'] ?? item['takenAt'] ?? item['taken_at_timestamp']),
         owner_username: owner,
         followers: pickNumber(item, ['followersCount', 'ownerFollowersCount', 'followers']),
+        video_play_count: pickNumber(item, ['videoPlayCount', 'video_play_count', 'playCount']),
+        video_view_count: pickNumber(item, ['videoViewCount', 'video_view_count', 'viewCount']),
+        video_duration: pickNumber(item, ['videoDuration', 'video_duration', 'duration']),
+        product_type: pickString(item, ['productType', 'product_type']),
+        location_name: pickString(item, ['locationName', 'location_name']),
+        location_id: pickString(item, ['locationId', 'location_id']),
+        hashtags: pickStringArray(item, ['hashtags', 'tags']),
+        mentions: pickStringArray(item, ['mentions', 'taggedUsernames']),
+        first_comment: pickString(item, ['firstComment', 'first_comment']),
+        owner_id: pickString(item, ['ownerId', 'owner_id']),
+        is_sponsored: pickBoolean(item, ['isSponsored', 'is_sponsored']),
+        dimensions: pickDimensions(item),
+        // Hard rule 8: the item goes in whole, before any of the mapping above
+        // is trusted. Nothing above is allowed to be the only copy of a field.
+        raw: item,
       });
     }
   }
@@ -230,12 +445,15 @@ export function parseApifyExports(
     throw new HttpError(
       400,
       'None of the uploaded records look like Instagram posts.',
-      'Each record needs an id/shortCode plus likes, comments, url or ownerUsername.',
+      skipped.profiles > 0
+        ? `Found ${skipped.profiles} profile record(s) instead — those are read by the profile importer, not by a post snapshot.`
+        : 'Each record needs an id/shortCode plus likes, comments, url or ownerUsername.',
     );
   }
 
   if (posts.length === 0) {
-    const known = [...mapping.personal, ...mapping.academy].map((u) => `@${u}`).join(', ');
+    const handles = canonicalHandles();
+    const known = [handles.personal, handles.academy].map((u) => `@${u}`).join(', ');
     throw new HttpError(
       400,
       `Found ${recognisedItems} posts, but none belong to a known account.`,
@@ -248,11 +466,12 @@ export function parseApifyExports(
   return {
     posts,
     stats: computeStats(posts),
-    skipped: { duplicates, unroutable },
+    skipped,
     usernames: {
       personal: [...usernames.personal].filter(Boolean),
       academy: [...usernames.academy].filter(Boolean),
     },
+    warnings: describeSkipped(skipped),
   };
 }
 
