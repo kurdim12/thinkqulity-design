@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "seed": "node --experimental-strip-types scripts/seed.ts"
+    "seed": "node --env-file=.env.local --experimental-strip-types scripts/seed.ts",
+    "doctor": "node --env-file=.env.local scripts/doctor.mjs"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.2",
