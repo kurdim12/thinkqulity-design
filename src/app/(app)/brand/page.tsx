@@ -400,30 +400,41 @@ export default function BrandPage() {
       </div>
 
       <Typography.Title level={5}>{tt('الطباعة', 'Typography')}</Typography.Title>
-      <Input
-        dir="auto"
-        placeholder={tt('اسم الخط كما هو في ملف الهوية', 'Font name exactly as written in the identity file')}
-        value={typoDisplay}
-        onChange={(e) => setTypoDisplay(e.target.value)}
-        style={{ marginBlockEnd: 8 }}
-        addonBefore={tt('عربي - عناوين', 'Arabic display')}
-      />
-      <Input
-        dir="auto"
-        placeholder={tt('اسم الخط كما هو في ملف الهوية', 'Font name exactly as written in the identity file')}
-        value={typoBody}
-        onChange={(e) => setTypoBody(e.target.value)}
-        style={{ marginBlockEnd: 8 }}
-        addonBefore={tt('عربي - نص', 'Arabic body')}
-      />
-      <Input
-        dir="auto"
-        placeholder={tt('اسم الخط كما هو في ملف الهوية', 'Font name exactly as written in the identity file')}
-        value={typoLatin}
-        onChange={(e) => setTypoLatin(e.target.value)}
-        style={{ marginBlockEnd: 8 }}
-        addonBefore={tt('لاتيني', 'Latin')}
-      />
+      {/* Real <label>s rather than Input addonBefore, which antd v5 deprecates
+          and which reads as part of the value to a screen reader. */}
+      {(
+        [
+          {
+            key: 'display',
+            label: tt('عربي — عناوين', 'Arabic display'),
+            value: typoDisplay,
+            set: setTypoDisplay,
+          },
+          {
+            key: 'body',
+            label: tt('عربي — نص', 'Arabic body'),
+            value: typoBody,
+            set: setTypoBody,
+          },
+          { key: 'latin', label: tt('لاتيني', 'Latin'), value: typoLatin, set: setTypoLatin },
+        ] as const
+      ).map((field) => (
+        <label key={field.key} style={{ display: 'block', marginBlockEnd: 8 }}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {field.label}
+          </Typography.Text>
+          <Input
+            dir="auto"
+            placeholder={tt(
+              'اسم الخط كما هو في ملف الهوية',
+              'Font name exactly as written in the identity file',
+            )}
+            value={field.value}
+            onChange={(e) => field.set(e.target.value)}
+            style={{ marginBlockStart: 4 }}
+          />
+        </label>
+      ))}
       <Input.TextArea
         dir="auto"
         placeholder={tt('ملاحظة', 'Note')}
