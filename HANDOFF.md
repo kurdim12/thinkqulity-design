@@ -67,6 +67,18 @@ The UI is bilingual EN/AR with real RTL.
 6. **Additive migrations only.** Never drop or rewrite an applied migration.
 7. **The Law never calls a model.** Anything in `src/lib/brain/law/` must stay a pure
    function. If a check needs a model, it is not Law — it belongs to the Judge.
+8. **Raw is sacred.** Every scrape run stores its complete raw payload before any mapping.
+   Fields not surfaced yet are still captured, so they are re-processable without
+   re-scraping.
+9. **Estimate before spend.** Every scrape computes result-count x actor-rate USD and
+   checks it against `APIFY_BUDGET_USD`. Over budget blocks with the number. A rate that
+   cannot be verified returns null and also BLOCKS — "estimate before spend" failing its
+   own precondition is not a reason to proceed.
+10. **Commenters are an audience, not targets.** Comment analysis is aggregate-only.
+    `author_handle` is stored for raw fidelity and read by nothing.
+11. **Timing claims need timing data.** Posting-time patterns are computed in code from
+    `posted_at` x engagement in Asia/Amman. Always show n. Low-n windows are excluded,
+    not reported.
 
 Conflict order: these rules → the task at hand → existing code conventions → your judgment
 (and note the call in the build record).
@@ -110,7 +122,7 @@ Law violations the Judge tried to pass are re-added and the verdict forced to `f
 
 Every generative capability is a `defineFeature` object in `src/lib/agent/features/`,
 registered with one line in `registry.ts`. Current features: `concepts`, `campaign`,
-`report`, `gaps`, `guideline`, `storyboard`.
+`report`, `gaps`, `guideline`, `storyboard`, `audience`.
 
 A feature with a `brain` config runs Law → Judge → one retry automatically.
 A feature without one behaves exactly as before. **Adding a capability should be one
@@ -131,18 +143,37 @@ All comparatives — `vs_account_avg`, `vs_format_avg`, `percentile` — are com
 explicitly forbidden from telling a causal story about a single post: with n=1 that is
 astrology, not analysis. The route returns a `RATES`-based USD estimate before you spend.
 
+### The ingestion spine (v3)
+
+- `src/lib/ingest/handles.ts` — canonical handles from env, one source of truth.
+- `src/lib/ingest/budget.ts` — pure estimate + guard. Apify rate verified from the actor
+  page 2026-08-14: Free $2.70 / Starter $2.30 / Scale $1.90 / Business $1.50 per 1,000
+  results; one result = one scraped item regardless of type (post, reel, comment, profile).
+- `src/lib/audience/posts.ts` — `distinctPosts()`. `posts` is UNIQUE (snapshot_id, ig_id),
+  so it holds ONE ROW PER POST PER SNAPSHOT. Every query that is not scoped to a single
+  snapshot must collapse by ig_id or it double-counts. This is the single most important
+  thing to know before touching any posts query.
+- `src/lib/audience/timing.ts` — pure timing arithmetic.
+- `src/lib/ingest/media.ts` — the MIRROR_MEDIA flag path, default OFF, hard cap 200
+  objects, SSRF host allow-list. Wired into the monitor import.
+
 ## 5. What exists — verified counts
 
 ```
-15 commits · 109 tracked files · 11,360 lines of TypeScript
-24 API routes · 11 screens · 8 scripts · 6 registered features
+17 commits · 130 tracked files · 24,552 lines of TypeScript
+28 API routes · 15 pages · 7 registered features · 13 npm scripts
+(the build reports 44 routes — Next.js counts its own generated entries too)
 tsc --noEmit    clean
-npm run build   ✓ compiled successfully
-npm test        26/26 Law tests pass
+npm test        116/116 pass
+npm run build   passes — 44 routes, 16/16 static pages
+npm run demo:check   honestly red: 9 failing, 7 passing
 ```
 
-**Screens:** dashboard · board · concepts (with a Storyboard tab) · campaigns · reports ·
-gaps · guideline · compliance · brand brain · data · settings
+**Screens** (12 under `(app)/`): dashboard · board · audience · concepts (with a
+Storyboard tab) · campaigns · calendar · reports · guideline · compliance · brand ·
+data · settings. Plus `login` and `auth/callback` outside the app shell.
+
+`gaps` is a registered **feature**, not a screen — it has no page of its own.
 
 **Scripts:** `dev` `build` `start` `typecheck` `test` `seed` `doctor` `login`
 `ingest:knowledge` `ingest:canon` `assets` `bakeoff` `demo:check`
@@ -153,62 +184,79 @@ Keep it that way.
 
 ## 6. PROVEN — verified by execution, not by reading code
 
-- **26/26 Law tests pass**, including an off-brand fixture that fails on palette *and*
-  claims and warns on register.
-- **Canon retrieval end-to-end** — `/api/canon` returned 200, 5 chunks, `method: "vector"`,
-  score 0.428, verbatim content with document title and tags attached.
-- **Bucket privacy**, probed from an unauthenticated client — the public object URL returns
-  **400 NoSuchBucket**; `/api/assets` returns **401**. The three client decks are no longer
-  fetchable by anyone holding a link.
-- **320 real posts ingested** from Apify across both accounts, deduped by `ig_id`.
-- **Palette sampled from published creatives** by dominant-colour analysis, not eyeballed.
-- `tsc --noEmit` clean · `npm run build` succeeds · `npm run demo:check` runs correctly
-  and reports honest red.
+- Migration 0002 applied to project `ftqzykrweiwbrsnogniz` and confirmed by SQL: 4 new
+  tables, RLS enabled with zero policies (deny-all), 14 additive nullable columns on
+  `posts`.
+- **116/116 tests pass** — law 26, budget, ingest, timing, posts, needs-human.
+- `npm run build` passes: 44 routes, 16/16 static pages, no RSC boundary or
+  route-manifest error.
+- **Canon retrieval end-to-end** — `/api/canon` 200, 5 chunks, method `vector`, verbatim
+  content with source.
+- **Bucket privacy**, probed unauthenticated — the public object URL returns
+  **400 NoSuchBucket**; `/api/assets` returns **401**.
+- **Canonical handles verified against ingested data** by `demo:check`, which reports
+  `320 post(s) in 320 row(s) across 1 snapshot(s)`.
+- Apify pricing independently verified from the actor page.
+- **Zero `any`, zero `@ts-ignore`, zero non-null assertions** across `src/` and `tests/` —
+  swept by grep, because tsc structurally cannot see non-null assertions.
 
 ## 7. NOT PROVEN — do not claim otherwise
 
-**Everything below is blocked on one thing: `OPENROUTER_API_KEY` is not set. No
-model-dependent code path has ever executed.**
+**Still blocked on `OPENROUTER_API_KEY`.** Unproven: the Judge fail path and needs_human
+live (the retry cycle IS asserted in tests with an injected fake judge, but never observed
+against a real model); bake-off; board analysed (0/320); guideline generated and approved;
+the Arabic print PDF; the compliance WOW path including its new Arabic-rewrite second leg;
+audience insights (no comments ingested).
 
-| Gate | Status |
-|---|---|
-| Off-brand output **fails, retries once, surfaces needs_human** | Law half tested; **Judge half unproven** |
-| Bake-off — 3 models on one task | **never run** |
-| Board analysed | **0 / 320** |
-| Guideline generated and approved | **never run** |
-| Arabic print-PDF of the guideline | **never rendered** |
-| The full compliance WOW path | **never run** |
-| `npm run demo:check` all green | **red — 6 failures** |
+**Also not proven, and worth its own line: no Apify run has ever executed in v3.** Zero
+scrapes, zero spend. The profile scrape, comment scrape and full monitor pipeline are
+written and typechecked but never called. So the estimate-vs-actual ledger has no rows,
+and the budget guard has never blocked a real run.
 
-Human-only gates, also unproven and not provable by any agent:
-**bake-off grading** (a person must read the blind Arabic), **Arabic register quality**,
-**demo rehearsal count**, **the recorded backup run**.
+Human-only gates unchanged: bake-off grading, Arabic register quality, rehearsal count,
+recorded backup.
 
 ## 8. Known gaps — flagged, not hidden
 
-1. **The `/bakeoff` grading screen was not built.** `scripts/bakeoff.mjs` exists and does
-   the real work — runs three models on one task, stores outputs under blind labels A/B/C,
-   `--show` prints them without revealing which model wrote which, `--winner` records the
-   decision. The blind comparison and the human decision are intact; the side-by-side UI
-   is not. `demo:check` still blocks until a winner is recorded.
-2. **The monitor does not auto-analyse new posts.** Batch analysis is chunked and resumable
-   as designed, but nothing triggers it when the monitor ingests new rows.
+1. `/bakeoff` grading screen still not built (the CLI does the real work).
+2. **Mirrored media has no reader.** `media.ts` is wired and runs, but nothing constructs
+   a URL to read the mirrored objects and there is no `<img>` on the Board — the Board is
+   caption-first by an earlier decision. Turning `MIRROR_MEDIA=true` today downloads
+   thumbnails into a bucket no screen displays. Decide: build the Board image path, or
+   drop the flag.
+3. **The analysed-set fix has a boundary at the 7th snapshot.** Analyses are matched to
+   posts through `ig_id` inside one 2000-row capped read. At ~320 posts per snapshot that
+   overflows at 2240 rows, after which an analysis whose cited row dropped out reads as
+   unanalysed and would be paid for twice. This is surfaced in the API response
+   (`unresolved_analyses`, `population.truncated`), not silent. The durable fix is an
+   additive `post_analyses.ig_id` column backfilled from that same in-memory map.
+4. `storeRawOrCloseLedger` now exists identically in three routes. Extracting it needs an
+   owner holding all three files.
+5. `TOKENS_IN_PER_POST` / `TOKENS_OUT_PER_POST` in the board analyze route were unsourced
+   constants rendered to the operator as dollars; they have been addressed but the cost
+   model is still an approximation and should say so wherever it appears.
 
 ## 9. Do this next, in order
 
 1. Put `OPENROUTER_API_KEY` in `.env.local`. Everything below is blocked without it.
-2. `npm run bakeoff` → `npm run bakeoff -- --show` → grade the blind Arabic yourself →
+2. Set `APIFY_BUDGET_USD` in `.env.local` — the guard is disarmed while it is blank, and
+   `demo:check` fails on it.
+3. Run the profile scrape from /data. This is the cheapest possible first run (2 results)
+   and it is the first time any of the v3 ingestion executes end to end. It retires the
+   seed follower figure and turns the dashboard em-dashes into dated real numbers.
+4. Then the comment scrape, then /audience -> Generate.
+5. `npm run bakeoff` → `npm run bakeoff -- --show` → grade the blind Arabic yourself →
    `npm run bakeoff -- --winner <model>`. **The default model must be chosen by reading
    graded Arabic, not inherited from whatever a commit happened to set.** Then set
    `AI_MODEL_QUALITY` / `AI_MODEL_STANDARD` to match.
-3. Open `/board`, run "Analyze all" until it reads 320/320. Then hand-check five computed
+6. Open `/board`, run "Analyze all" until it reads 320/320. Then hand-check five computed
    rows against SQL — the comparatives are the product's credibility.
-4. Paste the off-brand fixture into `/compliance` and **prove the fail path**: FAIL with
+7. Paste the off-brand fixture into `/compliance` and **prove the fail path**: FAIL with
    receipts → Apply fixes → PASS. Record the result in the build record. Until this is
    observed, the Judge is unproven.
-5. Generate a guideline on `/guideline`, approve v1, screenshot the Arabic print view.
-6. `npm run demo:check` until fully green. Red means do not demo.
-7. Then, if wanted: the `/bakeoff` grading screen, and monitor→analyse auto-wiring.
+8. Generate a guideline on `/guideline`, approve v1, screenshot the Arabic print view.
+9. `npm run demo:check` until fully green. Red means do not demo.
+10. Then, if wanted: the `/bakeoff` grading screen, and monitor→analyse auto-wiring.
 
 ## 10. The demo
 
