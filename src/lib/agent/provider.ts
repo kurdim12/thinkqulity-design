@@ -21,14 +21,21 @@ export function resolveProvider(): Provider {
 }
 
 /**
- * Defaults are the current frontier tier. Claude Opus 5 leads the August 2026
- * Artificial Analysis index (63) and is the strongest available model for
- * agentic work, which is what this app does; Sonnet 5 is the cheaper tier
- * behind the same header switch.
+ * Defaults on OpenRouter are the GPT-5.6 family.
  *
- * Override either with env to run a different model — on OpenRouter any model
- * id from https://openrouter.ai/models works, e.g. openai/gpt-5.6-sol or
- * google/gemini-3.7-flash.
+ * The reasoning, so the next person can re-litigate it with evidence rather
+ * than taste: this app's output is marketing copy — hooks, captions, a monthly
+ * report. Independent 2026 writing comparisons put GPT ahead of Gemini on
+ * polished, stylistically consistent persuasive copy, and ahead on holding
+ * structure across long documents (the report). Nobody has published a clean
+ * Arabic head-to-head between the closed frontier models — the Arabic
+ * leaderboards (OALL, HELM Arabic) rank open Arabic-specialist models — so
+ * treat this as a starting point, not a finding.
+ *
+ * Switching is one env line, deliberately: generate the same brief on two
+ * models and let the Arabic decide. Any id from https://openrouter.ai/models
+ * works, including anthropic/claude-opus-5, google/gemini-3.7-flash and
+ * deepseek/deepseek-v4-pro-0813.
  */
 const DEFAULT_MODELS: Record<Provider, Record<Quality, string>> = {
   anthropic: {
@@ -36,8 +43,8 @@ const DEFAULT_MODELS: Record<Provider, Record<Quality, string>> = {
     high: 'claude-opus-5',
   },
   openrouter: {
-    standard: 'anthropic/claude-sonnet-5',
-    high: 'anthropic/claude-opus-5',
+    standard: 'openai/gpt-5.6-terra',
+    high: 'openai/gpt-5.6-sol',
   },
 };
 

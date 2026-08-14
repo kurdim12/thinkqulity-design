@@ -71,20 +71,28 @@ Fill in:
 The provider is inferred from whichever key you set (OpenRouter wins if both
 are present); `AI_PROVIDER=anthropic|openrouter` forces it.
 
-Defaults are the current frontier tier:
+Defaults on OpenRouter:
 
-| Header switch | Model |
-|---|---|
-| Standard | `claude-sonnet-5` |
-| Quality | `claude-opus-5` |
+| Header switch | Model | Price /M in–out |
+|---|---|---|
+| Standard | `openai/gpt-5.6-terra` | $1 / $6 |
+| Quality | `openai/gpt-5.6-sol` | $5 / $30 |
 
-Claude Opus 5 tops the August 2026 Artificial Analysis index and leads
-specifically on agentic work, which is what this app does. Override either
-tier — on OpenRouter any id from openrouter.ai/models works:
+The output here is marketing copy — hooks, captions, a monthly report.
+Independent 2026 writing comparisons put GPT ahead of Gemini on polished,
+stylistically consistent persuasive copy and on holding structure across long
+documents. **No one has published a clean Arabic head-to-head between the
+closed frontier models** — the Arabic leaderboards (OALL, HELM Arabic) rank
+open Arabic-specialist models — so treat this default as a starting point, not
+a finding.
+
+Switching is one line, on purpose. Run the same brief through two models and
+let the Arabic decide:
 
 ```
-AI_MODEL_QUALITY=openai/gpt-5.6-sol
-AI_MODEL_STANDARD=google/gemini-3.7-flash
+AI_MODEL_QUALITY=anthropic/claude-opus-5        # top agentic scores
+AI_MODEL_QUALITY=google/gemini-3.7-flash        # $0.375 / $1.875
+AI_MODEL_QUALITY=deepseek/deepseek-v4-pro-0813  # open weights, very cheap
 ```
 
 Going through OpenRouter costs one extra network hop and gives up
