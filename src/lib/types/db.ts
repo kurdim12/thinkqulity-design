@@ -46,11 +46,21 @@ export interface KnowledgeDoc {
   content: string;
 }
 
+/** A file of the client's own creative, in the brand-assets bucket. */
+export interface BrandAsset {
+  name: string;
+  path: string;
+  url: string;
+  kind: 'creative' | 'document';
+  bytes: number;
+}
+
 export interface BrandRow {
   id: 1;
   facts: BrandFact[];
   voice_examples: VoiceExample[];
   knowledge: KnowledgeDoc[];
+  assets: BrandAsset[];
   palette: Palette | null;
   typography: Typography | null;
   audience_notes: string | null;

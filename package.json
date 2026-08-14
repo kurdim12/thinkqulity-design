@@ -11,7 +11,8 @@
     "seed": "node --env-file=.env.local --experimental-strip-types scripts/seed.ts",
     "doctor": "node --env-file=.env.local scripts/doctor.mjs",
     "login": "node --env-file=.env.local scripts/login-link.mjs",
-    "ingest:knowledge": "node --env-file=.env.local scripts/ingest-knowledge.mjs"
+    "ingest:knowledge": "node --env-file=.env.local scripts/ingest-knowledge.mjs",
+    "assets": "node --env-file=.env.local scripts/upload-assets.mjs"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.2",

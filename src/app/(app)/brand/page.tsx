@@ -342,14 +342,100 @@ export default function BrandPage() {
     </div>
   );
 
+  const creatives = (brand.assets ?? []).filter((a) => a.kind === 'creative');
+  const documents = (brand.assets ?? []).filter((a) => a.kind === 'document');
+
   const identityTab = (
     <div>
+      <Typography.Title level={5}>{tt('أعمال العلامة', 'Brand work')}</Typography.Title>
+      {creatives.length > 0 ? (
+        <>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
+              gap: 12,
+              marginBlockEnd: 12,
+            }}
+          >
+            {creatives.map((asset) => (
+              <a
+                key={asset.path}
+                href={asset.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={asset.name}
+                style={{ display: 'block', lineHeight: 0 }}
+              >
+                {/* Plain <img>: these are Supabase Storage URLs, not a
+                    configured next/image remote host. */}
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={asset.url}
+                  alt={asset.name}
+                  loading="lazy"
+                  style={{
+                    width: '100%',
+                    aspectRatio: '1 / 1',
+                    objectFit: 'cover',
+                    borderRadius: 8,
+                    border: '1px solid var(--tq-line)',
+                  }}
+                />
+              </a>
+            ))}
+          </div>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {tt(
+              `${creatives.length} منشورًا منشورًا. الألوان أدناه مأخوذة من هذه الملفات نفسها.`,
+              `${creatives.length} published pieces. The palette below was sampled from these files.`,
+            )}
+          </Typography.Text>
+        </>
+      ) : (
+        <EmptyState
+          description={tt(
+            'لم تُرفع أي أعمال بعد.',
+            'No brand work uploaded yet.',
+          )}
+          actionLabel={tt('كيف أرفعها', 'How to upload')}
+          onAction={() =>
+            message.info(
+              tt(
+                'ضع الملفات بجانب مجلد التطبيق ونفّذ: npm run assets',
+                'Put the files beside the app folder and run: npm run assets',
+              ),
+            )
+          }
+        />
+      )}
+
+      {documents.length > 0 ? (
+        <div style={{ marginBlockStart: 12, marginBlockEnd: 24 }}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {tt('مستندات: ', 'Documents: ')}
+          </Typography.Text>
+          {documents.map((doc) => (
+            <a
+              key={doc.path}
+              href={doc.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ marginInlineEnd: 12, fontSize: 12 }}
+            >
+              {doc.name}
+            </a>
+          ))}
+        </div>
+      ) : null}
+
       <Upload.Dragger
         multiple
         accept="image/*,.pdf"
         fileList={fileList}
         beforeUpload={() => false}
         onChange={(info) => setFileList(info.fileList)}
+        style={{ marginBlockStart: 16 }}
       >
         <p className="ant-upload-text">{tt('اسحب الملفات هنا أو انقر للاختيار', 'Drag files here or click to select')}</p>
       </Upload.Dragger>
@@ -358,8 +444,8 @@ export default function BrandPage() {
         showIcon
         style={{ marginBlockStart: 12, marginBlockEnd: 24 }}
         message={tt(
-          'رفع الملفات محلي فقط في هذه النسخة — استخرج الألوان والخطوط يدويًا وأدخلها أدناه.',
-          'File drop is local-only in this build — read the colours and fonts off the asset yourself and enter them below.',
+          'هذا المربع للمعاينة فقط — للرفع الدائم استخدم: npm run assets',
+          'This drop zone is preview-only — to store assets permanently run: npm run assets',
         )}
       />
 

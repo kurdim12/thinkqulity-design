@@ -20,6 +20,7 @@ export const EMPTY_BRAND: BrandRow = {
   facts: [],
   voice_examples: [],
   knowledge: [],
+  assets: [],
   palette: null,
   typography: null,
   audience_notes: null,
@@ -84,6 +85,9 @@ export function renderContextBlocks(ctx: AgentContext): string {
     palette: ctx.brand.palette,
     typography: ctx.brand.typography,
     audience_notes: ctx.brand.audience_notes,
+    // Names only — the agent can reference a specific published piece
+    // ("in the style of the الشخصية post") without the URLs eating context.
+    assets: (ctx.brand.assets ?? []).map((a) => ({ name: a.name, kind: a.kind })),
   });
 
   const snapshot = ctx.latestSnapshot
