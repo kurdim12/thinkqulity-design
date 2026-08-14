@@ -24,7 +24,7 @@ const anthropic = process.env.ANTHROPIC_API_KEY?.trim();
 const provider = (process.env.AI_PROVIDER ?? (openrouter ? 'openrouter' : anthropic ? 'anthropic' : '')).toLowerCase();
 
 if (!provider) {
-  bad('Model provider key', 'set OPENROUTER_API_KEY in .env.local (openrouter.ai/keys) and add credit');
+  bad('Model provider key', 'set OPENROUTER_API_KEY in .env.local (openrouter.ai/keys), the default provider, and add credit — or ANTHROPIC_API_KEY with AI_PROVIDER=anthropic to use Anthropic directly');
 } else {
   // A key that is present but rejected is worse than one that is absent,
   // because it fails in front of the client rather than here.

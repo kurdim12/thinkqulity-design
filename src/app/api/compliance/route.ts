@@ -47,7 +47,7 @@ function describeModelFailure(err: unknown): ModelFailure {
   if (err instanceof MissingEnvError) {
     return {
       reason: `No model provider key is configured (${err.key}).`,
-      hint: 'Set ANTHROPIC_API_KEY or OPENROUTER_API_KEY in .env.local and run the check again.',
+      hint: 'Set OPENROUTER_API_KEY in .env.local (get one at openrouter.ai/keys) and run the check again — or ANTHROPIC_API_KEY with AI_PROVIDER=anthropic to use Anthropic directly.',
     };
   }
   if (err instanceof HttpError) return { reason: err.message, hint: err.hint ?? null };
@@ -350,7 +350,7 @@ export async function POST(request: Request) {
         throw new HttpError(
           503,
           `The rewrite needs a model, and no provider key is configured (${err.key}).`,
-          'Set ANTHROPIC_API_KEY or OPENROUTER_API_KEY in .env.local. The Law findings above needed no key — they already ran.',
+          'Set OPENROUTER_API_KEY in .env.local (get one at openrouter.ai/keys) — or ANTHROPIC_API_KEY with AI_PROVIDER=anthropic to use Anthropic directly. The Law findings above needed no key — they already ran.',
         );
       }
       throw err;

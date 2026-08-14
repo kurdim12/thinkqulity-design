@@ -14,7 +14,17 @@ const REQUEST_TIMEOUT_MS = 280_000;
 
 let anthropicClient: Anthropic | null = null;
 function anthropic(): Anthropic {
-  if (!anthropicClient) anthropicClient = new Anthropic({ apiKey: requireEnv('ANTHROPIC_API_KEY') });
+  // Only reached when resolveProvider() actually picked 'anthropic' — callers
+  // gate on that before calling callAnthropic(). Guarded again here so the key
+  // this throws about always matches the provider that was really resolved,
+  // and an OpenRouter default never surfaces an ANTHROPIC_API_KEY error.
+  const provider = resolveProvider();
+  if (provider !== 'anthropic') {
+    throw new Error(
+      `anthropic() was called while the resolved provider is "${provider}" — this is a bug, not a missing key.`,
+    );
+  }
+  if (!anthropicClient) anthropicClient = new Anthropic({ apiKey: requireEnv(providerKeyName(provider)) });
   return anthropicClient;
 }
 
@@ -194,7 +204,9 @@ export async function runAgentJson<T>({
   const model = modelFor(quality, provider);
   const turns: Turn[] = [{ role: 'user', content: userMessage }];
 
-  // Fail early and clearly rather than deep inside an SDK call.
+  // Fail early and clearly rather than deep inside an SDK call. Named for the
+  // provider that was actually resolved (MissingEnvError.key), so an
+  // OpenRouter default never surfaces an ANTHROPIC_API_KEY error.
   requireEnv(providerKeyName(provider));
 
   let usage = { input_tokens: 0, output_tokens: 0 };

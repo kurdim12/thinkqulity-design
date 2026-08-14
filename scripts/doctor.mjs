@@ -49,7 +49,7 @@ if (provider === 'openrouter' && openrouter) {
 } else if (provider === 'anthropic' && anthropic) {
   pass(`ANTHROPIC_API_KEY — set (${anthropic.length} chars); provider: anthropic`);
 } else {
-  fail('No model provider key set — generation will fail. Set OPENROUTER_API_KEY or ANTHROPIC_API_KEY.');
+  fail('No model provider key set — generation will fail. Set OPENROUTER_API_KEY (openrouter.ai/keys), the default provider, or ANTHROPIC_API_KEY with AI_PROVIDER=anthropic.');
 }
 
 const url = present('NEXT_PUBLIC_SUPABASE_URL');

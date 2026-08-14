@@ -210,6 +210,16 @@ const PUBLISHED_RATES: Record<string, TokenRate> = {
   'claude-opus-5': { in: 5, out: 25 },
   'claude-sonnet-5': { in: 3, out: 15 },
   'claude-haiku-4-5': { in: 1, out: 5 },
+  // OpenRouter model ids below, USD per MILLION tokens, read 2026-08-15 from
+  // https://openrouter.ai/api/v1/models. Keyed by the bare id (the last
+  // segment after the vendor slash), same as normaliseModel() below.
+  'gpt-5.6-luna': { in: 0.1, out: 0.6 },
+  'qwen3.7-plus': { in: 0.32, out: 1.28 },
+  'gemini-3.7-flash': { in: 0.38, out: 1.88 },
+  'deepseek-v4-pro-0813': { in: 0.43, out: 0.87 },
+  'qwen3.7-flash': { in: 0.03, out: 0.13 },
+  'gpt-5.6-terra': { in: 1, out: 6 },
+  'gpt-5.6-sol': { in: 5, out: 30 },
 };
 
 /**

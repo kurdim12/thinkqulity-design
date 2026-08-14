@@ -83,8 +83,13 @@ if (!apiKey) {
   process.exit(1);
 }
 
+// Default candidates and their verified out-$/M (openrouter.ai/api/v1/models,
+// read 2026-08-15), so an operator can see run cost at a glance:
+//   qwen/qwen3.7-plus              $1.28
+//   google/gemini-3.7-flash        $1.88
+//   deepseek/deepseek-v4-pro-0813  $0.87
 const MODELS = (process.env.BAKEOFF_MODELS ??
-  'openai/gpt-5.6-sol,anthropic/claude-opus-5,google/gemini-3.7-flash')
+  'qwen/qwen3.7-plus,google/gemini-3.7-flash,deepseek/deepseek-v4-pro-0813')
   .split(',')
   .map((m) => m.trim())
   .filter(Boolean);
