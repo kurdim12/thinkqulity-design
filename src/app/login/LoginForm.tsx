@@ -155,13 +155,29 @@ export function LoginForm({ missingEnv }: { missingEnv: string[] }) {
           </Form>
         ) : (
           <Form layout="vertical" onFinish={() => void verifyCode()}>
+            <Alert
+              type="success"
+              showIcon
+              style={{ marginBlockEnd: 16 }}
+              message={tt('تفقّد بريدك', 'Check your email')}
+              description={
+                <>
+                  {tt('أرسلنا رسالة إلى ', 'We sent a message to ')}
+                  <strong dir="ltr">{email}</strong>.{' '}
+                  {tt(
+                    'اضغط الرابط داخلها لتسجيل الدخول — هذا كل المطلوب.',
+                    'Click the link inside it to sign in — that is all you need to do.',
+                  )}
+                </>
+              }
+            />
+
             <Form.Item
-              label={tt('الرمز المكوّن من ٦ أرقام', '6-digit code')}
+              label={tt('أو الصق الرمز المكوّن من ٦ أرقام', 'Or paste the 6-digit code')}
               help={tt(
-                `أُرسل إلى ${email}. إن وصلك رابط بدل الرمز، اضغط عليه مباشرة.`,
-                `Sent to ${email}. If the email contains a link instead of a code, just click it.`,
+                'يظهر الرمز فقط إذا كان قالب البريد يتضمّن {{ .Token }}.',
+                'A code only appears if the email template includes {{ .Token }}.',
               )}
-              required
             >
               <Input
                 size="large"
