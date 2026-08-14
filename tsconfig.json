@@ -12,6 +12,9 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
+    // The Law modules are pure and dependency-free so they run directly under
+    // `node --test --experimental-strip-types`, which needs explicit extensions.
+    "allowImportingTsExtensions": true,
     "jsx": "preserve",
     "incremental": true,
     "plugins": [{ "name": "next" }],
