@@ -19,6 +19,7 @@ export const EMPTY_BRAND: BrandRow = {
   id: 1,
   facts: [],
   voice_examples: [],
+  knowledge: [],
   palette: null,
   typography: null,
   audience_notes: null,
@@ -136,5 +137,21 @@ export function renderContextBlocks(ctx: AgentContext): string {
         )
       : '<recent_concepts>[] — nothing generated yet.</recent_concepts>';
 
-  return [brand, snapshot, pillars, recent].join('\n\n');
+  /**
+   * Ahmad's own material, in full. This corpus is a few thousand tokens against
+   * a million-token window, so there is no reason to summarise, embed or
+   * fine-tune it — the agent reads all of it every time and cites the source
+   * file the same way it cites a snapshot field.
+   */
+  const knowledge =
+    ctx.brand.knowledge && ctx.brand.knowledge.length > 0
+      ? `<knowledge>\n${ctx.brand.knowledge
+          .map(
+            (doc) =>
+              `--- source: ${doc.source} (${doc.kind}) ---\n${doc.content}`,
+          )
+          .join('\n\n')}\n</knowledge>`
+      : '<knowledge>[] — no workshop material loaded. Run: npm run ingest:knowledge</knowledge>';
+
+  return [brand, knowledge, snapshot, pillars, recent].join('\n\n');
 }

@@ -38,10 +38,19 @@ export interface Typography {
   note?: string | null;
 }
 
+/** One of Ahmad's own documents, read in context and cited by `source`. */
+export interface KnowledgeDoc {
+  title: string;
+  source: string;
+  kind: string;
+  content: string;
+}
+
 export interface BrandRow {
   id: 1;
   facts: BrandFact[];
   voice_examples: VoiceExample[];
+  knowledge: KnowledgeDoc[];
   palette: Palette | null;
   typography: Typography | null;
   audience_notes: string | null;
