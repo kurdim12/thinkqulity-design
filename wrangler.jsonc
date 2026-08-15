@@ -108,6 +108,40 @@
   // ===================================================================== //
   "limits": { "cpu_ms": 300000 },
 
+  // ===================================================================== //
+  // RUNTIME BINDINGS — and why keep_vars is on.
+  //
+  // wrangler's own schema: "By default, the Wrangler configuration file is the
+  // source of truth for your environment configuration ... If you change your
+  // vars in the dashboard, wrangler *will* override/delete them on its next
+  // deploy." Default false. This is exactly what happened on 2026-08-15: the
+  // operator set Text-type variables in the dashboard, the next git push ran
+  // `wrangler deploy` from CI, and every plaintext var was wiped. Secrets
+  // survived (they live in a separate store); plain vars did not. The login
+  // page then reported the keys as unset even though the operator had set them.
+  //
+  // Two defences, both here:
+  //   1. keep_vars: true — dashboard vars survive CI deploys.
+  //   2. Non-secret configuration is DECLARED here, so it never depends on the
+  //      dashboard in the first place. These values are public by design
+  //      (handles are on Instagram; the URL and anon key ship in the browser
+  //      bundle; the rest are tuning knobs). Nothing secret goes in `vars`.
+  //
+  // Secrets are NOT here and never will be: SUPABASE_SERVICE_ROLE_KEY,
+  // APIFY_TOKEN, OPENROUTER_API_KEY, ALLOWED_EMAILS. Those are set once with
+  // `wrangler secret put` or the dashboard's Secret type and persist on their own.
+  // ===================================================================== //
+  "keep_vars": true,
+  "vars": {
+    "NEXT_PUBLIC_SUPABASE_URL": "https://ftqzykrweiwbrsnogniz.supabase.co",
+    "IG_HANDLE_PERSONAL": "ahmadkahtan_",
+    "IG_HANDLE_ACADEMY": "thinkquality_academyy",
+    "COMMENTS_TOP_N": "50",
+    "COMMENTS_PER_POST": "100",
+    "MIRROR_MEDIA": "false",
+    "AI_PROVIDER": "openrouter"
+  },
+
   // Pin execution beside the database. Supabase for this app is in EU-Central
   // (Frankfurt) and EVERY route is database-bound: `next build` renders all 44
   // entries in its route table as `ƒ (Dynamic)` — zero static, zero SSG. Of the

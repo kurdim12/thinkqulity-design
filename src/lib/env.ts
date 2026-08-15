@@ -3,6 +3,11 @@
  * with no `.env` — the app only fails when a route actually needs a value.
  */
 
+// Via the `@/` alias, not `./env.workers`: the test loaders in tests/*.test.ts
+// resolve `@/*` to `src/*.ts`, and one of them reads a dotted relative
+// specifier ("env.workers") as already having an extension.
+import { workerBinding } from '@/lib/env.workers';
+
 export type EnvKey =
   | 'ANTHROPIC_API_KEY'
   | 'OPENROUTER_API_KEY'
@@ -47,17 +52,52 @@ export class MissingEnvError extends Error {
 }
 
 /**
- * NOTE — this is a DYNAMIC index, `process.env[key]`, not `process.env.FOO`.
- * Next's build-time inlining only rewrites literal property reads, so nothing
- * read through here is ever baked into the bundle. Every value must genuinely
- * be present on `process.env` at RUNTIME, which on Cloudflare Workers means it
- * must exist as a `vars` entry or a secret binding on the deployed Worker.
+ * The raw, untrimmed value of `key`, or `undefined` when neither source has it.
+ * The single read site for both `optionalEnv` and `isBlank`, so "set", "blank"
+ * and "absent" are all judged against the same sources in the same order.
+ *
+ * TWO SOURCES, IN THIS ORDER:
+ *
+ *   1. The Cloudflare Worker's per-request `env` — the bindings object the
+ *      runtime hands to `fetch(request, env, ctx)`, read through the adapter's
+ *      `getCloudflareContext()` (see env.workers.ts). This is where `vars` and
+ *      `wrangler secret put` values actually live on Workers; it is the source
+ *      of truth, and it is request-scoped, so it is exactly right inside a
+ *      route handler or a server-component render. Outside Workers (plain
+ *      `next dev` / `next start`, tests, scripts) `workerBinding` is a no-op
+ *      that returns `undefined`.
+ *
+ *   2. `process.env[key]` — local dev reads `.env.local` through this, tests and
+ *      scripts set it, and on Workers the adapter's first-request init COPIES
+ *      the string bindings from `env` onto it.
+ *
+ * WHY 1 BEFORE 2. The deployed /login page (a `force-dynamic` server
+ * component) rendered its "Setup incomplete" alert naming the four required
+ * keys as unset while the same deployment's OTP route handler saw them and
+ * called Supabase — i.e. the RSC render was observing a `process.env` on which
+ * the adapter's copy of the bindings had not landed. Route handlers and server
+ * components hold the same request context, so reading the request's own
+ * `env` first removes the dependence on that copy having happened at all,
+ * whatever the ordering: if a binding exists on the Worker, it is found here.
+ * `process.env` stays as the fallback so nothing outside Workers changes.
+ *
+ * NOTE — the process.env read is a DYNAMIC index, `process.env[key]`, not
+ * `process.env.FOO`. Next's build-time inlining only rewrites literal property
+ * reads, so nothing read through here is ever baked into the bundle. Every
+ * value must genuinely be present at RUNTIME, which on Cloudflare Workers
+ * means a `vars` entry or a secret binding on the deployed Worker.
  *
  * A missing binding therefore fails at request time, not at build time. See
  * `checkRequiredEnv()` at the foot of this file for the deliberate check.
  */
+function rawEnv(key: EnvKey): string | undefined {
+  const bound = workerBinding(key);
+  if (bound !== undefined) return bound;
+  return process.env[key];
+}
+
 export function optionalEnv(key: EnvKey): string | null {
-  const value = process.env[key];
+  const value = rawEnv(key);
   return value && value.trim().length > 0 ? value.trim() : null;
 }
 
@@ -141,10 +181,10 @@ export function mirrorMedia(): boolean {
 
 /* ============================================== boot-time binding checking ==
  *
- * Why this exists. `optionalEnv` reads `process.env[key]` with a dynamic index,
- * so Next inlines nothing — every value has to be present on `process.env` at
- * runtime, sourced on Workers from a `vars` entry or a secret binding. The
- * build cannot tell you one is absent. The first symptom is a 500 from
+ * Why this exists. `optionalEnv` reads the Worker's request `env` and then
+ * `process.env[key]` with a dynamic index, so Next inlines nothing — every
+ * value has to be present at runtime, sourced on Workers from a `vars` entry
+ * or a secret binding. The build cannot tell you one is absent. The first symptom is a 500 from
  * whichever route happened to need it, which on a demo day is the worst
  * possible moment to discover it. This turns that into one deliberate question
  * you can ask before anyone clicks anything.
@@ -385,9 +425,9 @@ function envBlankHint(key: EnvKey): string {
     : `${key} is bound but empty — give it a value in "vars" in wrangler.jsonc, then redeploy`;
 }
 
-/** Exists on process.env but trims to nothing. `optionalEnv` reads it as absent. */
+/** Bound (Worker `env` or process.env) but trims to nothing. `optionalEnv` reads it as absent. */
 function isBlank(key: EnvKey): boolean {
-  const raw = process.env[key];
+  const raw = rawEnv(key);
   return raw !== undefined && raw.trim().length === 0;
 }
 
