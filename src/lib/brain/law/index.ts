@@ -4,12 +4,15 @@ import { paletteClaims, paletteRefs } from './palette-claims.ts';
 import { claimsLinter } from './claims-linter.ts';
 import { registerScore } from './register-score.ts';
 import { frameStructure, guidelineStructure, type FrameLike, type GuidelineSection } from './structure.ts';
+import { sourceKeys, type SourceKeysInput } from './source-keys.ts';
 
 export * from './types.ts';
 export { paletteClaims, paletteRefs, claimsLinter, registerScore, guidelineStructure, frameStructure };
 export { REQUIRED_SECTIONS, TBD_AR } from './structure.ts';
 export type { GuidelineSection, FrameLike } from './structure.ts';
 export { profile } from './register-score.ts';
+export { sourceKeys, parseRenderedMeasures } from './source-keys.ts';
+export type { BasisLike, CitedClaim, ClaimGrounding, SourceKeysInput } from './source-keys.ts';
 
 /** Zod validation expressed as a Law check so it appears in the same report. */
 export function schemaValid(schema: z.ZodTypeAny, value: unknown): LawResult {
@@ -31,6 +34,12 @@ export interface LawInput {
   paletteReferences?: (string | null | undefined)[];
   frames?: FrameLike[];
   guidelineSections?: GuidelineSection[];
+  /**
+   * The strategist's citations, the keys its context blocks emitted, and those
+   * blocks. Supplied only by paths that cite source keys; every other feature
+   * simply does not get this check rather than getting a vacuous pass.
+   */
+  sourceKeys?: SourceKeysInput;
 }
 
 export interface LawReport {
@@ -51,6 +60,9 @@ export function runLaw(input: LawInput): LawReport {
 
   if (input.context !== undefined) {
     results.push(claimsLinter(input.text, input.context));
+  }
+  if (input.sourceKeys !== undefined) {
+    results.push(sourceKeys(input.sourceKeys));
   }
   if (input.voiceExamples !== undefined) {
     results.push(registerScore(input.text, input.voiceExamples));

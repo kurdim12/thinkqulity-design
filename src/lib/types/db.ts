@@ -336,3 +336,182 @@ export interface AudienceInsightRow {
   grounding: Grounding;
   created_at: string;
 }
+
+/* ===========================================================================
+ * Strategist — mirrors supabase/migrations/0003_strategist.sql.
+ *
+ * The strategist reads the context blocks assembled by
+ * src/lib/agent/strategist/blocks.ts, states what changed, and writes down the
+ * decisions it wants judged later. Two properties hold across every type here:
+ *
+ *   1. Every claim carries its evidence as `BasisRef[]` (hard rule 3), and
+ *      every BasisRef names a `source_key` that the blocks actually emitted.
+ *   2. No quantity in any of these types is a number. See BasisRef.
+ * =========================================================================== */
+
+/**
+ * One piece of evidence under a claim: the key of a value the context blocks
+ * emitted, and that value.
+ *
+ * `value` is a STRING, and that is load-bearing rather than incidental. The
+ * strategist is forbidden to do arithmetic — every average, delta, ratio and
+ * count it is allowed to speak is computed in code and handed to it already
+ * finished, paired with a key. Typing `value` as `string` makes the ban
+ * structural instead of advisory: a model that returns `{value: 508}` fails
+ * validation, `value * 2` does not compile, and there is no silent coercion
+ * path by which a quoted figure could be recomputed, rounded or rescaled
+ * between the block that measured it and the sentence that states it. The
+ * value is pass-through text: it must equal, character for character, the
+ * value rendered under `source_key`. That equality is checkable — which is the
+ * whole point, and is what the Law check over `collectSourceKeys()` does.
+ *
+ * It also means a value may be an em-dash, an Arabic-Indic numeral, or a
+ * verbatim quote, none of which a numeric type could carry.
+ */
+export interface BasisRef {
+  /** A dotted key emitted by renderStrategistBlocks(), e.g. `profiles.personal.followers`. */
+  source_key: string;
+  /** The value as rendered under that key, VERBATIM. Never a number type. */
+  value: string;
+}
+
+export type DecisionKind = 'recommendation' | 'experiment' | 'alert' | 'escalation';
+
+/**
+ * A decision is 'open' until someone reads its outcome. There is deliberately
+ * no 'closed': a decision nobody judged stays open and stays visible.
+ */
+export type DecisionStatus = 'open' | 'validated' | 'refuted' | 'superseded';
+
+/**
+ * One recommendation, written down BEFORE its result is known, with the
+ * evidence it rests on, what would prove it, and the date it is to be judged.
+ */
+export interface DecisionRow {
+  id: string;
+  kind: DecisionKind;
+  statement_ar: string;
+  basis: BasisRef[];
+  grounding: Grounding;
+  /** What would count as this working — stated in advance, not after. */
+  expected_signal: string;
+  /** ISO date, `YYYY-MM-DD`. */
+  review_after: string;
+  status: DecisionStatus;
+  /** Null until a human reviews it. Null means "not judged", never "fine". */
+  outcome_note: string | null;
+  created_at: string;
+}
+
+/**
+ * Whether the period actually contained anything. 'quiet' is a real answer and
+ * is stored as one: a week with no movement produces a short honest digest
+ * rather than a padded one.
+ */
+export type DigestStatus = 'material' | 'quiet';
+
+/** ISO dates, inclusive. */
+export interface StrategistPeriod {
+  from: string;
+  to: string;
+}
+
+/**
+ * One movement between two DATED measurements. A delta only exists when both
+ * ends were measured — a single measurement produces no delta at all, rather
+ * than a delta against an assumed zero (hard rule 2). `basis` therefore carries
+ * both ends and the computed difference, all as text.
+ */
+export interface StrategistDelta {
+  label_ar: string;
+  direction: 'up' | 'down' | 'flat';
+  basis: BasisRef[];
+  grounding: Grounding;
+}
+
+/** A win or a concern: one sentence, its evidence, and how well grounded it is. */
+export interface StrategistFinding {
+  statement_ar: string;
+  basis: BasisRef[];
+  grounding: Grounding;
+}
+
+/**
+ * The strategist correcting itself. A past decision that the data has since
+ * contradicted is named here in the same digest that supersedes it — being
+ * wrong in public is the mechanism, not a failure of it.
+ */
+export interface StrategistCorrection {
+  /** The decision being corrected, when there is one on the ledger. */
+  decision_id: string | null;
+  what_was_said_ar: string;
+  what_is_true_ar: string;
+  basis: BasisRef[];
+}
+
+/** A decision as the agent proposes it, before it is persisted and has an id. */
+export interface ProposedDecision {
+  kind: DecisionKind;
+  statement_ar: string;
+  basis: BasisRef[];
+  grounding: Grounding;
+  expected_signal: string;
+  /** ISO date, `YYYY-MM-DD`. */
+  review_after: string;
+}
+
+/**
+ * One thing a human is being asked to do. Capped by the action budget in the
+ * `<meta>` block (default 3) — a list of twelve actions is a list nobody does.
+ */
+export interface StrategistAction {
+  do_ar: string;
+  owner: 'operator' | 'client';
+  /** ISO date, or null when the action is not time-boxed. */
+  by_date: string | null;
+  /**
+   * Index into `StrategistPayload.decisions`, or null when the action stands
+   * alone. An index rather than an id because a proposed decision has no id
+   * until it is persisted.
+   */
+  decision_index: number | null;
+}
+
+/**
+ * The strategist's full output contract, stored verbatim in `digests.payload`.
+ * Every list may be empty — an empty `wins` is an honest answer and is not
+ * filled in to look complete.
+ */
+export interface StrategistPayload {
+  period: StrategistPeriod;
+  status: DigestStatus;
+  /** One line, Arabic, no invented figures. */
+  headline_ar: string;
+  deltas: StrategistDelta[];
+  wins: StrategistFinding[];
+  concerns: StrategistFinding[];
+  corrections: StrategistCorrection[];
+  decisions: ProposedDecision[];
+  actions: StrategistAction[];
+  /**
+   * True when the run must not be sent without a human reading it first. The
+   * reason belongs in `operator_notes`.
+   */
+  needs_human: boolean;
+  /** What the client would actually receive. Arabic, client-facing register. */
+  client_digest_ar: string;
+  /** For the operator only — caveats, gaps, what to scrape next. Never sent. */
+  operator_notes: string[];
+}
+
+/** One stored strategist run. `sent` only ever moves when a human sends it. */
+export interface DigestRow {
+  id: string;
+  period_from: string;
+  period_to: string;
+  status: DigestStatus;
+  payload: StrategistPayload;
+  client_digest_ar: string;
+  sent: boolean;
+  created_at: string;
+}

@@ -6,6 +6,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { Layout, Menu, Segmented, Dropdown, Typography, Tooltip, App } from 'antd';
 import {
   AppstoreOutlined,
+  AuditOutlined,
   BulbOutlined,
   CalendarOutlined,
   DatabaseOutlined,
@@ -43,6 +44,7 @@ export function Shell({ email, children }: { email: string; children: React.Reac
     { key: '/campaigns', icon: <RocketOutlined />, label: t.nav.campaigns },
     { key: '/calendar', icon: <CalendarOutlined />, label: t.nav.calendar },
     { key: '/reports', icon: <FileTextOutlined />, label: t.nav.reports },
+    { key: '/digest', icon: <AuditOutlined />, label: tt('التقرير الأسبوعي', 'Weekly digest') },
     { key: '/board', icon: <TableOutlined />, label: t.nav.board },
     // Labelled inline rather than from dict.ts: the dictionary is shared with
     // other work in flight, and this screen needs exactly one new string.
