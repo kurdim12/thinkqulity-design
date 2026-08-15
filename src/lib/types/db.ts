@@ -401,6 +401,22 @@ export interface DecisionRow {
   /** Null until a human reviews it. Null means "not judged", never "fine". */
   outcome_note: string | null;
   created_at: string;
+  // --- 0004_v4_visual: the fence, as columns instead of as prose ---
+  /**
+   * The ceiling on an experiment — max posts, max spend, max weeks. Both this
+   * and `kill_condition` used to be packed into `expected_signal` and parsed
+   * back out by two mirrored string splitters that shared no constant and were
+   * bound by no test (fencedSignal / splitFencedSignal). A fence routed through
+   * prose is a fence no check can reach.
+   *
+   * Required and nullable, like every other optional-in-meaning field in this
+   * contract: a recommendation writes null rather than omitting the key, which
+   * keeps "this decision has no cap" a statement rather than a gap. Null means
+   * "no cap was stated" — never "unlimited".
+   */
+  cap: string | null;
+  /** The observable that ends the experiment early. Null = none was stated. */
+  kill_condition: string | null;
 }
 
 /**
@@ -513,5 +529,131 @@ export interface DigestRow {
   payload: StrategistPayload;
   client_digest_ar: string;
   sent: boolean;
+  created_at: string;
+}
+
+/* ===========================================================================
+ * v4 visual — mirrors supabase/migrations/0004_v4_visual.sql.
+ *
+ * The vision layer TRANSCRIBES and CLASSIFIES images that already exist. Hard
+ * rule 13: describing is not generating. No type here, and nothing that
+ * consumes one, produces or edits an image — `storage_path` points at a mirror
+ * of the client's own post, and `text_in_image_ar` is what the image says, not
+ * what someone thinks it should say.
+ * =========================================================================== */
+
+/**
+ * One colour measured out of an image, with how much of the image it covers.
+ *
+ * `share` is a number, and unlike everywhere else in this file that is safe:
+ * it is counted in code over decoded pixels, never asked of a model. A model
+ * that could return a share could return 0.42 for an image it never opened; a
+ * counter cannot. Contrast BasisRef.value, which is a string precisely because
+ * a model does hand it over.
+ */
+export interface DominantColor {
+  /** Lowercase `#rrggbb`. */
+  hex: string;
+  /** Fraction of sampled pixels, 0–1 (not a percentage). Computed in code. */
+  share: number;
+}
+
+/**
+ * Whether the image is on-palette. 'warn' is a real middle answer — some brand
+ * colour present but not the primary — and is not rounded to either side.
+ */
+export type PaletteVerdict = 'pass' | 'warn' | 'fail';
+
+/**
+ * The image's colours checked against `brand.palette`.
+ *
+ * Both lists hold swatch NAMES from `Palette.swatches`, never hex values —
+ * the same rule `Frame.palette_ref` follows. The hexes actually found live in
+ * `VisualFeatureRow.dominant_colors`, so nothing is stated twice and the two
+ * can be read side by side: what the brand defines, and what the image used.
+ */
+export interface PaletteMatch {
+  /** Brand swatch names this image does use. */
+  matched: string[];
+  /** Brand swatch names this image does not use. */
+  unmatched: string[];
+  verdict: PaletteVerdict;
+}
+
+/**
+ * What one post's image contains, transcribed and classified.
+ *
+ * Keyed on `ig_id`, NOT on a `posts.id`. `posts` is UNIQUE (snapshot_id,
+ * ig_id) — one row per post per snapshot — so keying on the scrape row would
+ * describe the same unchanged image once per scrape, at model cost each time.
+ * The image belongs to the post, so the key is the post's own Instagram id and
+ * the database enforces it.
+ *
+ * Every column except `ig_id`, `account` and `grounding` is nullable, and the
+ * nulls are load-bearing (hard rule 2): null means "not determined", never
+ * "no" and never zero. `has_face: null` is an image nobody has read yet;
+ * `has_face: false` is an image someone read and found no face in.
+ */
+export interface VisualFeatureRow {
+  id: string;
+  /** The post's Instagram id — stable across every snapshot. Unique. */
+  ig_id: string;
+  account: Account;
+  /**
+   * Where the mirrored image lives. Null means "not mirrored", never "no
+   * image": `posts.raw` is null for every row stored before that column
+   * existed, so those media URLs are expired and there is nothing to fetch
+   * until a refresh scrape runs.
+   */
+  storage_path: string | null;
+  has_face: boolean | null;
+  /** How much of the frame the face occupies, as a classified band. */
+  face_prominence: string | null;
+  /** Text READ OFF the image, verbatim. Render with dir="auto". */
+  text_in_image_ar: string | null;
+  /** How much of the frame is text, as a classified band. */
+  text_coverage: string | null;
+  logo_present: boolean | null;
+  dominant_colors: DominantColor[] | null;
+  palette_match: PaletteMatch | null;
+  composition_tags: string[] | null;
+  /** The model that read the image. Null until one has. */
+  model: string | null;
+  grounding: Grounding;
+  created_at: string;
+}
+
+/**
+ * One stored board analysis. The table predates this file (it was created by
+ * the v2 design-brain migration, which lives in the project's migration
+ * history rather than in supabase/migrations/); this type is written down here
+ * because 0004 adds a column to it and five call sites were each declaring
+ * their own shape.
+ *
+ * `post_id` references `posts.id` — a scrape ROW — and `ig_id` is the post
+ * itself, backfilled by 0004 from that same join. Both are kept: `post_id`
+ * records WHICH observation was read and against which population the
+ * comparatives in `computed` were frozen; `ig_id` is what survives the next
+ * scrape, so analysis already paid for stays attached to the post the board
+ * actually shows. `ig_id` is nullable because a row whose post was deleted
+ * cannot be resolved, and an unresolvable id is left visible as null rather
+ * than guessed.
+ */
+export interface PostAnalysisRow {
+  id: string;
+  post_id: string | null;
+  /**
+   * The comparatives, computed in code before the model was called — in
+   * practice `ComputedAnalysis` from src/lib/board/compute.ts (vs_account_avg,
+   * vs_format_avg, percentile, days_old). Typed structurally rather than by
+   * import so this file stays a leaf with no dependencies.
+   */
+  computed: Record<string, number | null>;
+  cluster_label: string | null;
+  explanation: string | null;
+  grounding: Grounding;
+  model: string | null;
+  /** The post's Instagram id. See the note above. Added by 0004_v4_visual. */
+  ig_id: string | null;
   created_at: string;
 }

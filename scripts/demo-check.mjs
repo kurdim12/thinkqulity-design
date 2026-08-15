@@ -5,15 +5,39 @@
  * only says "no" gets ignored five minutes before a pitch.
  */
 import { createClient } from '@supabase/supabase-js';
+import { registerHooks } from 'node:module';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
 
 let failures = 0;
+let notes = 0;
 const ok = (label, detail = '') => console.log(`  PASS  ${label}${detail ? ` — ${detail}` : ''}`);
 const bad = (label, fix) => {
   failures += 1;
   console.log(`  FAIL  ${label}\n        fix: ${fix}`);
+};
+
+/**
+ * A third outcome, and it earns its place rather than softening the second one.
+ *
+ * FAIL means "a person can make this green before the demo". Some states are
+ * neither green nor fixable from this checklist: the thing is genuinely absent,
+ * the reason is upstream, and no button on any screen will change it today.
+ * Printing those as FAIL trains the reader to skim past red — the exact failure
+ * mode the header of this file exists to prevent — and printing them as PASS
+ * would be a lie. NOTE says the true thing: measured, stated, not actionable
+ * here, and NOT counted toward the exit code.
+ *
+ * The bar is deliberately high. A NOTE must name the upstream blocker it
+ * measured, and any check that could be made green by an operator action is a
+ * FAIL. Nothing that was a FAIL before this comment was written is a NOTE now.
+ */
+const note = (label, detail) => {
+  notes += 1;
+  console.log(`  NOTE  ${label}\n        ${detail}`);
 };
 
 console.log('\nDemo preflight\n');
@@ -465,9 +489,438 @@ concepts > 0
   ? ok('Warm concepts cached', `${concepts}`)
   : bad('Warm concepts cached', 'generate a batch on /concepts so a slow live run has something to fall back on');
 
+/* ============================================================== v4 surfaces ==
+ *
+ * The strategist, the ledger, the vision layer and the MCP door. Each of these
+ * is a screen or an endpoint a demo can land on, so each gets the same
+ * treatment as everything above: measured against the real deployment, and a
+ * failure that names the one action that clears it.
+ * ========================================================================== */
+
+/* -------------------------------------------------------------- the digest -- */
+
+/**
+ * The strategist's output. /digest is the screen the ledger hangs off, and an
+ * absent digest is an empty state there — so this is checked before the
+ * decisions that a digest is what produces.
+ */
+const { data: digestRows, error: digestError } = await db
+  .from('digests')
+  // The columns 0003_strategist.sql actually declares. Named explicitly rather
+  // than `select('*')` so a wrong guess fails loudly here — as it did — instead
+  // of quietly rendering an undefined as an empty string in the line below.
+  .select('period_from, period_to, status, created_at, sent')
+  .order('created_at', { ascending: false })
+  .limit(1);
+
+const digest = digestRows?.[0];
+if (digestError) {
+  bad(
+    'Digest exists',
+    `the digests table could not be read — ${digestError.message}. Confirm SUPABASE_SERVICE_ROLE_KEY is ` +
+      'the service-role key, and that supabase/migrations/0003_strategist.sql is applied',
+  );
+} else if (digest) {
+  // `sent` is recorded by a human, by hand, in the database — nothing in this
+  // app writes it (hard rule 1). So it is reported, never required.
+  ok(
+    'Digest exists',
+    `${digest.period_from} → ${digest.period_to}, ${digest.status}, written ${String(digest.created_at).slice(0, 10)}` +
+      `${digest.sent ? ' (recorded as sent)' : ' (not marked sent — a human records that by hand)'}`,
+  );
+} else {
+  bad(
+    'Digest exists',
+    'no digest has ever been written, so /digest is an empty state and the decision ledger it feeds ' +
+      'has nothing in it — open /digest and press Run. That run calls a model, so the provider key ' +
+      'check above has to be green first',
+  );
+}
+
+/* ------------------------------------------------------------- the ledger -- */
+
+/**
+ * Amman's date, assembled from NAMED parts — the same construction
+ * todayInAmman() uses in src/lib/agent/features/strategist.ts, and for the same
+ * reason: en-CA renders ISO-shaped dates today, and reading the segments by
+ * position would let a locale-data change silently produce a plausible wrong
+ * date. `past_review` is computed against Amman by /api/decisions, so a
+ * preflight computing it against UTC would disagree with the screen for three
+ * hours of every day.
+ */
+const AMMAN_TIME_ZONE = 'Asia/Amman';
+const AMMAN_DATE_FORMAT = new Intl.DateTimeFormat('en-CA', {
+  timeZone: AMMAN_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
+function todayInAmman() {
+  const parts = AMMAN_DATE_FORMAT.formatToParts(new Date());
+  const part = (type) => parts.find((p) => p.type === type)?.value ?? '';
+  const iso = `${part('year')}-${part('month')}-${part('day')}`;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+    throw new Error(`Could not resolve today's date in ${AMMAN_TIME_ZONE}.`);
+  }
+  return iso;
+}
+
+const ammanToday = todayInAmman();
+
+/**
+ * A decision past its review date with no verdict recorded is the one state the
+ * ledger exists to make impossible to ignore. It is also the worst thing to
+ * walk into live: the demo opens /decisions, and the top row is an overdue
+ * question nobody answered.
+ *
+ * The population is always stated. "0 past due" over an EMPTY ledger and "0
+ * past due" over forty judged decisions are different facts, and printing the
+ * same green line for both would be the kind of zero-standing-in-for-absence
+ * this checklist refuses everywhere else (hard rule 2).
+ */
+const { data: ledgerRows, error: ledgerError } = await db
+  .from('decisions')
+  .select('id, status, review_after, statement_ar')
+  .order('review_after', { ascending: true });
+
+if (ledgerError) {
+  bad(
+    'Decision ledger reviewed',
+    `the decisions table could not be read — ${ledgerError.message}. Confirm ` +
+      'supabase/migrations/0003_strategist.sql is applied',
+  );
+} else {
+  const ledger = ledgerRows ?? [];
+  const open = ledger.filter((row) => row.status === 'open');
+  const pastDue = open.filter((row) => row.review_after <= ammanToday);
+
+  if (pastDue.length > 0) {
+    const oldest = pastDue[0];
+    bad(
+      'Decision ledger reviewed',
+      `${pastDue.length} of ${open.length} open decision(s) are past their review date as of ` +
+        `${ammanToday} in ${AMMAN_TIME_ZONE} — the oldest came due ${oldest.review_after}. Open ` +
+        '/decisions, read what actually happened, and record validated / refuted / superseded with ' +
+        'a note on each. There is no path back to open, so record only what you can stand behind',
+    );
+  } else if (ledger.length === 0) {
+    // Vacuously true, and said as such. Green here means "nothing is overdue"
+    // and NOT "the ledger is healthy" — there is no ledger yet.
+    ok(
+      'Decision ledger reviewed',
+      `nothing is overdue because the ledger is empty — 0 decisions on record. It fills when a ` +
+        `digest runs (checked above); the date this was computed against is ${ammanToday} in ${AMMAN_TIME_ZONE}`,
+    );
+  } else {
+    ok(
+      'Decision ledger reviewed',
+      `0 of ${open.length} open decision(s) past due, ${ledger.length} on record — as of ` +
+        `${ammanToday} in ${AMMAN_TIME_ZONE}`,
+    );
+  }
+}
+
+/* ------------------------------------------------------- the visual batch -- */
+
+/**
+ * HOW 0/320 IS REPORTED, AND WHY IT IS NOT A FAILURE TODAY.
+ *
+ * The vision layer describes an image that already exists (hard rule 13). For
+ * it to describe anything, an image has to be reachable: the scrape has to have
+ * stored a raw payload carrying a media URL, and the mirror has to have copied
+ * the bytes into the private bucket before that URL expired.
+ *
+ * Every one of the 320 stored posts predates `posts.raw`, so there is no media
+ * URL to mirror and nothing in the bucket to read. 0 described is therefore not
+ * "nobody pressed the button" — it is the ONLY state reachable until a refresh
+ * scrape runs, and no action on this checklist moves it. That is a NOTE: the
+ * number is printed, the denominator is printed, and the upstream blocker is
+ * named. Hiding it would be dishonest; failing on it would be a red line that
+ * cannot be cleared, which is how a checklist becomes wallpaper.
+ *
+ * THE OTHER BRANCH IS A REAL FAILURE. When images ARE available and the batch
+ * has not been run, the work is possible and was skipped — the demo would show
+ * empty visual cards over a bucket full of thumbnails. That is a FAIL, and it
+ * names the run.
+ */
+const [
+  { count: describedCount, error: visualError },
+  { count: rawCount, error: rawError },
+] = await Promise.all([
+  db.from('visual_features').select('id', { count: 'exact', head: true }),
+  db.from('posts').select('id', { count: 'exact', head: true }).not('raw', 'is', null),
+]);
+
+/** Objects actually sitting under `post-media/<account>/`, per media.ts. */
+const MIRROR_BUCKET = 'brand-assets';
+const MIRROR_PREFIX = 'post-media';
+let mirroredObjects = 0;
+let mirrorListError = null;
+for (const account of ACCOUNTS) {
+  const { data, error } = await db.storage
+    .from(MIRROR_BUCKET)
+    .list(`${MIRROR_PREFIX}/${account}`, { limit: 1000 });
+  if (error) mirrorListError = error.message;
+  else mirroredObjects += data.length;
+}
+
+const described = describedCount ?? 0;
+// The same denominator the Board counts in: POSTS, collapsed on ig_id, not
+// scrape rows. visual_features is keyed on ig_id for exactly this reason.
+const describable = distinctPostCount;
+
+if (visualError) {
+  bad(
+    'Visual batch state',
+    `visual_features could not be read — ${visualError.message}. Apply ` +
+      'supabase/migrations/0004_v4_visual.sql (Supabase dashboard → SQL editor → paste the file → Run; ' +
+      'it is additive and rewrites no earlier migration)',
+  );
+} else if (describable > 0 && described >= describable) {
+  ok('Visual batch state', `${described}/${describable} post(s) described`);
+} else if (mirrorListError !== null) {
+  bad(
+    'Visual batch state',
+    `${described}/${describable} post(s) described, and the mirror bucket could not be listed — ` +
+      `${mirrorListError}. Until that listing works this check cannot tell "no images exist" from ` +
+      '"images exist and were not read", so the state is unknown rather than green or red',
+  );
+} else if (mirroredObjects > 0) {
+  bad(
+    'Visual batch state',
+    `${described}/${describable} post(s) described, but ${mirroredObjects} mirrored image(s) are ` +
+      `sitting in ${MIRROR_BUCKET}/${MIRROR_PREFIX}/ waiting to be read — the work is possible and ` +
+      'was not done. POST /api/visual to run the batch (it estimates the cost first and refuses ' +
+      'when the model has no verified rate)',
+  );
+} else {
+  note(
+    'Visual batch state',
+    `${described}/${describable} post(s) described — and that is the honest floor, not a skipped step. ` +
+      `${rawError ? `posts.raw could not be counted (${rawError.message}); ` : `${rawCount ?? 0} of ${describable} stored post(s) carry a raw payload; `}` +
+      `${mirroredObjects} image(s) are mirrored under ${MIRROR_BUCKET}/${MIRROR_PREFIX}/. ` +
+      'With no stored media URL there is nothing to mirror, and with nothing mirrored there is no ' +
+      'image for the vision layer to describe — it transcribes what exists and never generates one ' +
+      '(hard rule 13). This clears only after a refresh scrape stores raw payloads and MIRROR_MEDIA ' +
+      'copies the bytes; no action on this checklist moves it. Do not demo a visual surface today.',
+  );
+}
+
+/* ---------------------------------------------------------- the MCP door -- */
+
+/**
+ * PROVEN BY EXECUTION, NOT BY READING THE ENV.
+ *
+ * "MCP_ACCESS_TOKEN is set" is a config fact. What a demo needs is a BEHAVIOUR:
+ * that the endpoint answers a real tools/list when the token is presented and
+ * refuses one when it is not. So the real `handleMcpRequest` is imported and
+ * called here, against this machine's real environment and the real database.
+ *
+ * The module is TypeScript and this script is .mjs, so the '@/' alias and the
+ * extensionless relative imports inside src/ are resolved by the same
+ * registerHooks arrangement tests/mcp.test.ts uses. `@/lib/auth` is the one
+ * stub: it pulls in next/server, which cannot load outside a Next runtime, and
+ * the only thing the MCP module takes from it is the HttpError shape. Nothing
+ * about the gate itself is stubbed — the auth path, the registry and the cap
+ * count are all the real ones.
+ *
+ * NO TOKEN IS EVER SYNTHESISED. If MCP_ACCESS_TOKEN is unset, the positive
+ * branch is not run and is not claimed: injecting a token and then reporting
+ * that the door opened would be a pass this deployment did not earn.
+ */
+const SRC_DIR = new URL('../src/', import.meta.url).href;
+const AUTH_STUB_URL = 'stub:demo-check-lib-auth';
+
+const tsFile = (base) => {
+  for (const candidate of [`${base}.ts`, `${base}/index.ts`]) {
+    if (existsSync(fileURLToPath(candidate))) return candidate;
+  }
+  return null;
+};
+
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier === '@/lib/auth') return { url: AUTH_STUB_URL, shortCircuit: true };
+    if (specifier.startsWith('@/')) {
+      const resolved = tsFile(new URL(specifier.slice(2), SRC_DIR).href);
+      if (resolved) return { url: resolved, shortCircuit: true };
+    }
+    const parent = context.parentURL;
+    if (specifier.startsWith('.') && parent?.startsWith('file:') && !/\.[a-z]+$/i.test(specifier)) {
+      const resolved = tsFile(new URL(specifier, parent).href);
+      if (resolved) return { url: resolved, shortCircuit: true };
+    }
+    return nextResolve(specifier, context);
+  },
+  load(url, context, nextLoad) {
+    if (url === AUTH_STUB_URL) {
+      return {
+        format: 'module',
+        shortCircuit: true,
+        source:
+          'export class HttpError extends Error {' +
+          '  constructor(status, message, hint) {' +
+          '    super(message); this.name = "HttpError"; this.status = status; this.hint = hint;' +
+          '  }' +
+          '}',
+      };
+    }
+    return nextLoad(url, context);
+  },
+});
+
+// Type-stripping a .ts file emits MODULE_TYPELESS_PACKAGE_JSON once per module,
+// which would bury the checklist in warnings. Only that one is dropped; every
+// other warning still prints, because silencing the channel wholesale is how a
+// real deprecation goes unnoticed.
+// Node reports this one with `name` left at the generic "Warning" and the
+// identifier on `code` — which is why matching on `name` alone silently forwards
+// it and prints the very noise this block exists to drop. Both are checked.
+const TYPELESS = 'MODULE_TYPELESS_PACKAGE_JSON';
+const defaultWarningListeners = process.listeners('warning');
+process.removeAllListeners('warning');
+process.on('warning', (warning) => {
+  if (warning.code === TYPELESS || warning.name === TYPELESS) return;
+  for (const listener of defaultWarningListeners) listener(warning);
+});
+
+const MCP_FIX_SET_TOKEN =
+  'set MCP_ACCESS_TOKEN in .env.local to a long random string (and bind the same value in ' +
+  'production with: wrangler secret put MCP_ACCESS_TOKEN). An unset token is a CLOSED door by ' +
+  'design — the endpoint refuses every call, including the one you were going to demo';
+
+const mcpCall = (mcp, method, token) =>
+  mcp.handleMcpRequest(
+    new Request('https://demo-check.invalid/api/mcp', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method }),
+    }),
+  );
+
+let mcp = null;
+try {
+  mcp = await import('../src/lib/mcp/tools.ts');
+} catch (err) {
+  bad(
+    'MCP gate',
+    `src/lib/mcp/tools.ts could not be loaded, so the door was not tested at all — ${err.message}. ` +
+      'This script relies on Node type-stripping; run it on the Node version in package.json',
+  );
+}
+
+if (mcp) {
+  const token = process.env.MCP_ACCESS_TOKEN?.trim() ?? '';
+  const expectedTools = [...mcp.MCP_TOOL_NAMES].sort();
+
+  try {
+    // THE REFUSAL, proven first and proven always: it is the branch a
+    // "convenient" future edit is most likely to invert.
+    const anonymous = await mcpCall(mcp, 'tools/list', undefined);
+    const wrongToken = await mcpCall(mcp, 'tools/list', 'demo-check-deliberately-wrong-token');
+
+    if (anonymous.status !== 401 || wrongToken.status !== 401) {
+      bad(
+        'MCP gate',
+        `tools/list answered ${anonymous.status} with NO token and ${wrongToken.status} with a wrong ` +
+          'one; both must be 401. The MCP endpoint is not behind requireOperator() — the bearer ' +
+          'token is its only door. Do not deploy until src/lib/mcp/tools.ts authorize() refuses both',
+      );
+    } else if (token === '') {
+      bad(
+        'MCP gate',
+        `the door correctly refuses an unauthenticated call and a wrong token (401 on both), but ` +
+          `MCP_ACCESS_TOKEN is unset, so it refuses the RIGHT token too and no MCP client can ` +
+          `connect — ${MCP_FIX_SET_TOKEN}`,
+      );
+    } else {
+      const authorised = await mcpCall(mcp, 'tools/list', token);
+      const payload = await authorised.json().catch(() => null);
+      const listed = (payload?.result?.tools ?? []).map((tool) => tool.name).sort();
+      const matches =
+        listed.length === expectedTools.length &&
+        listed.every((name, index) => name === expectedTools[index]);
+
+      if (authorised.status !== 200) {
+        bad(
+          'MCP gate',
+          `tools/list answered ${authorised.status} with the configured MCP_ACCESS_TOKEN — the token ` +
+            'in .env.local is not the one the server compares against, or the request was malformed. ' +
+            'Re-issue it and set the same value on both sides',
+        );
+      } else if (!matches) {
+        bad(
+          'MCP gate',
+          `tools/list answered 200 but listed [${listed.join(', ')}] where the registry declares ` +
+            `[${expectedTools.join(', ')}]. The allow-list in src/lib/mcp/tools.ts and what the door ` +
+            'actually serves must be the same set — reconcile them before exposing the endpoint',
+        );
+      } else {
+        ok(
+          'MCP gate',
+          `refuses with no token and with a wrong one (401 on both), answers tools/list with the ` +
+            `configured token (200, ${listed.length} tools: ${listed.join(', ')})`,
+        );
+      }
+    }
+  } catch (err) {
+    bad(
+      'MCP gate',
+      `the door threw instead of answering — ${err.message}. An endpoint that throws on tools/list ` +
+        'cannot be demoed; fix it in src/lib/mcp/tools.ts before exposing it',
+    );
+  }
+
+  /**
+   * Hard rule 14: an external caller cannot spend freely. The cap is counted
+   * against the REAL tables, in the REAL Amman window, so what is reported here
+   * is what an MCP client would actually meet — including the operator's own
+   * work in the browser, which shares the window.
+   */
+  try {
+    const cap = await mcp.readCapState();
+    if (!Number.isFinite(cap.limit) || cap.limit <= 0) {
+      bad(
+        'MCP cap armed',
+        `the daily generation cap resolved to ${cap.limit}, which bounds nothing — set ` +
+          `${cap.env_key} to a positive integer, or unset it to take the default of ` +
+          `${mcp.DEFAULT_DAILY_GENERATION_CAP}`,
+      );
+    } else if (cap.remaining <= 0) {
+      bad(
+        'MCP cap armed',
+        `the cap is armed at ${cap.limit} ${cap.unit} and ${cap.used} are already used, so the next ` +
+          `model-backed call — from an MCP client OR from the browser — is refused until ` +
+          `${cap.resets_at} (${cap.resets_on}, ${cap.time_zone}). Either demo before generating ` +
+          `anything else, or raise ${cap.env_key}`,
+      );
+    } else {
+      ok(
+        'MCP cap armed',
+        `${cap.used}/${cap.limit} used, ${cap.remaining} left in the ${cap.time_zone} day, resets ` +
+          `${cap.resets_at} — counted from ${Object.entries(cap.counted)
+            .map(([table, n]) => `${table} ${n}`)
+            .join(' + ')}`,
+      );
+    }
+  } catch (err) {
+    // readCapState() fails CLOSED: an uncounted window would otherwise read as
+    // zero used, which is an open spending door. Report it the same way.
+    bad(
+      'MCP cap armed',
+      `the cap could not be counted, so every model-backed MCP call fails closed — ${err.message}. ` +
+        'Confirm the concepts and compliance_checks tables are readable with the service-role key',
+    );
+  }
+}
+
 console.log(
   failures === 0
-    ? '\nAll green. Rehearse it ten times, record one clean run, then demo.\n'
-    : `\n${failures} check(s) failed. Do not demo until they are green.\n`,
+    ? `\nAll green${notes > 0 ? ` (${notes} note(s) above — read them; they are measured states nothing on this list can change)` : ''}. Rehearse it ten times, record one clean run, then demo.\n`
+    : `\n${failures} check(s) failed${notes > 0 ? `, ${notes} note(s)` : ''}. Do not demo until they are green.\n`,
 );
 process.exitCode = failures === 0 ? 0 : 1;

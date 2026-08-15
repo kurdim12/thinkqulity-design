@@ -3,6 +3,7 @@ import { requireOperator, errorResponse, HttpError } from '@/lib/auth';
 import { readQuality } from '@/lib/prefs.server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { modelFor } from '@/lib/agent/client';
+import { rateFor, unpricedReason } from '@/lib/agent/rates';
 import { JUDGE_SYSTEM } from '@/lib/brain/judge';
 import { STRATEGIST_SYSTEM } from '@/lib/agent/strategist/system';
 import {
@@ -95,9 +96,20 @@ interface DigestEstimate {
   output_tokens_ceiling: number;
   /** THE ASSUMPTION. Everything above in tokens rests on it. */
   chars_per_token: number;
-  /** Null until a verified per-token rate is reachable from here. Never 0. */
+  /** Null when this model has no rate anybody verified. Never 0. */
   usd: number | null;
+  /** The rates the figure was multiplied by, so the screen can show its work. */
+  rate_in_per_mtok: number | null;
+  rate_out_per_mtok: number | null;
   unpriced_reason: string | null;
+}
+
+/** Rounds UP to the next cent, so a ceiling never reads below what it bounds. */
+function ceilToCents(value: number): number {
+  // toFixed first: binary floating point turns exact cents into 2.7000000000003
+  // and a naive ceil would push $2.70 to $2.71. Same rule /api/board/analyze
+  // applies, for the same reason.
+  return Math.ceil(Number((value * 100).toFixed(6))) / 100;
 }
 
 function estimateFor(model: string, agentPromptChars: number, blocksChars: number): DigestEstimate {
@@ -114,7 +126,11 @@ function estimateFor(model: string, agentPromptChars: number, blocksChars: numbe
   // ceiling above; it is named here rather than left as an implied zero.
   const inputChars = AGENT_CALLS_CEILING * agentPromptChars + JUDGE_CALLS_CEILING * judgePromptChars;
 
-  return {
+  const inputTokens = Math.ceil(inputChars / CHARS_PER_TOKEN);
+  const outputTokens =
+    AGENT_CALLS_CEILING * STRATEGIST_MAX_TOKENS + JUDGE_CALLS_CEILING * JUDGE_MAX_TOKENS;
+
+  const base = {
     model,
     calls: { agent_ceiling: AGENT_CALLS_CEILING, judge_ceiling: JUDGE_CALLS_CEILING },
     chars: {
@@ -123,16 +139,38 @@ function estimateFor(model: string, agentPromptChars: number, blocksChars: numbe
       candidate_allowance: candidateAllowance,
       judge_overhead_allowance: JUDGE_OVERHEAD_CHARS,
     },
-    input_tokens_ceiling: Math.ceil(inputChars / CHARS_PER_TOKEN),
-    output_tokens_ceiling:
-      AGENT_CALLS_CEILING * STRATEGIST_MAX_TOKENS + JUDGE_CALLS_CEILING * JUDGE_MAX_TOKENS,
+    input_tokens_ceiling: inputTokens,
+    output_tokens_ceiling: outputTokens,
     chars_per_token: CHARS_PER_TOKEN,
-    usd: null,
-    unpriced_reason:
-      'The only per-token rates this repository has verified against a vendor price page live in ' +
-      'src/app/api/board/analyze/route.ts (PUBLISHED_RATES) and are not exported from that route ' +
-      'module. Copying them here would create a second table to go stale, so this estimate is ' +
-      'stated in tokens. Move that table to a lib module and this figure becomes a dollar ceiling.',
+  };
+
+  // THE TABLE MOVED, AND THIS FOLLOWED IT. Until 2026-08-15 this returned
+  // `usd: null` with a reason naming src/app/api/board/analyze/route.ts as the
+  // only place a verified rate lived and stating it was not exported. Both
+  // halves of that sentence stopped being true when PUBLISHED_RATES became
+  // src/lib/agent/rates.ts — so the refusal was no longer a refusal, it was a
+  // stale string telling the operator to look in a file that no longer holds
+  // the table, beside an em-dash standing in for a figure this route could
+  // already compute. The rate is read from the one table now, on the same terms
+  // every other estimate reads it: a model nobody has priced still returns null
+  // and says so, in the one spelling unpricedReason() owns.
+  const rate = rateFor(model);
+  if (rate === null) {
+    return {
+      ...base,
+      usd: null,
+      rate_in_per_mtok: null,
+      rate_out_per_mtok: null,
+      unpriced_reason: unpricedReason(model),
+    };
+  }
+
+  return {
+    ...base,
+    usd: ceilToCents((inputTokens * rate.in) / 1_000_000 + (outputTokens * rate.out) / 1_000_000),
+    rate_in_per_mtok: rate.in,
+    rate_out_per_mtok: rate.out,
+    unpriced_reason: null,
   };
 }
 

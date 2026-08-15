@@ -2,6 +2,13 @@
 
 Run `npm run demo:check` first. Red means do not demo.
 
+It prints three outcomes, and they are not the same thing. **FAIL** is a state
+someone can clear before the demo, and every one of them names the single
+action that clears it. **NOTE** is a state that was measured, is genuinely
+absent, and that nothing on this checklist can move — it is printed in full and
+does not affect the exit code. **PASS** always shows the number it passed on,
+so a green line can be checked rather than trusted.
+
 ---
 
 ## THE WOW
@@ -56,6 +63,64 @@ had to earn its own pass.*
 arithmetic. This one can be slow, and with no provider key it does not run at
 all. `demo:check` gates it: if **Model provider key** is red, rehearse the FAIL
 leg only and show the recorded run for the rewrite.
+
+---
+
+## OPTIONAL BEAT — THE AGENT THAT ADMITS IT WAS WRONG
+
+**For an agency audience only. Cut it for everyone else, and cut it first.**
+The WOW above does not change and does not move.
+
+Agencies have seen dashboards refuse a hex code. What they have not seen is a
+system that wrote down what it expected to happen, came back on a date it set
+itself, and recorded that it was wrong. That is the beat: open **`/digest`** on
+a week whose corrections lead, then click through to **`/decisions`**.
+
+What to show, in this order:
+
+1. **The digest, on the correction.** Not the wins. Read the correction aloud
+   and let it sit.
+2. **Click into `/decisions`.** Expand the refuted row. Show `basis` — the
+   source keys the context blocks emitted and the values they rendered,
+   verbatim. Those strings are printed exactly as stored, never re-rounded, so
+   they match the block line character for character.
+3. **Point at `cap` and `kill_condition`.** The ceiling the decision was given
+   and the observable that would end it early — both written *before* the
+   result was known, both real columns, not prose parsed back out of a
+   sentence.
+4. **Say the line:** *it set its own review date, it came back on it, and it
+   recorded a refutation against the evidence it originally cited.*
+
+Three properties are worth naming while the row is open, because each one is
+enforced in code and an agency will ask:
+
+- **There is no path back to `open`.** A recorded verdict cannot be quietly
+  withdrawn. The update is scoped to open rows, so a decision judged between
+  the page load and the click is left exactly as it was judged and the caller
+  is told.
+- **A verdict requires a note.** A status with no reason is not a review.
+- **Nothing here marks a digest as sent.** There is no code path that writes
+  that flag. Sending the digest to the client is a human act performed outside
+  this product, and the column exists so a person can record it by hand.
+
+**Say plainly what is not automated.** The verdict is a human act — the
+operator reads what actually happened and records it. The system's contribution
+is that it makes the question unavoidable: a decision nobody judged stays open,
+stays visible, and shows up past-due. If you are asked whether corrections are
+*forced* to lead the digest: they are not. Nothing in the code reads the order
+of the digest text today. Say so — it is a smaller admission than the one the
+beat is built on.
+
+**Staging this beat is the hard part, and today it is not staged.**
+`demo:check` reports **Digest exists** red and the decision ledger empty: no
+digest has ever been run against this database, so there is no refuted decision
+to open. A refuted decision cannot be manufactured for a demo without
+fabricating the history that produced it — which is the one thing this whole
+product exists not to do. Either run the strategist far enough ahead that a
+review date genuinely arrives and a real verdict gets recorded, or cut the
+beat. Do not stage it with invented rows.
+
+If the slot is short, this beat is the first thing to go after Audience.
 
 ---
 
@@ -121,6 +186,17 @@ a digit in that field is rejected before it is stored.
       no ceiling: every scrape that can be costed is waved through
 - [ ] A provider key `demo:check` reports green — without one, the Arabic
       rewrite leg cannot run and the WOW is half a demo
+- [ ] No decision past its review date without a verdict. `demo:check` reports
+      this against Amman's date, the same date `/decisions` computes it from.
+      An overdue unanswered row is the worst thing to walk into live
+- [ ] **Only if you are running the optional agency beat:** a digest exists and
+      a decision has genuinely been reviewed and refuted. `demo:check` reports
+      **Digest exists** and the ledger state. Do not fabricate either
+- [ ] **Only if you are demoing the MCP endpoint:** `MCP_ACCESS_TOKEN` bound.
+      `demo:check` proves the door refuses an unauthenticated call *and*
+      answers `tools/list` with the configured token. Unset means the endpoint
+      refuses everything, including your demo — check the daily generation cap
+      has room left in the Amman day before you rely on a live MCP call
 - [ ] `npm run demo:check` fully green
 - [ ] Do Not Disturb on, notifications off, clean browser profile
 - [ ] Font zoom 110–125% — Arabic at default size does not read from the back

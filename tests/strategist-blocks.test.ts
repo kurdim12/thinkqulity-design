@@ -178,6 +178,10 @@ function fullLedger(): DecisionRow[] {
       review_after: '2026-08-01',
       status: 'open',
       outcome_note: null,
+      // A recommendation carries no fence; 0004 stores that as two nulls
+      // rather than as an absent key.
+      cap: null,
+      kill_condition: null,
       created_at: '2026-07-18T00:00:00Z',
     },
     {
@@ -190,6 +194,10 @@ function fullLedger(): DecisionRow[] {
       review_after: '2026-09-30',
       status: 'validated',
       outcome_note: 'أثبت التجربة',
+      // Null, not a fabricated fence: this fixture predates the columns and
+      // nothing in blocks.ts reads them yet, so null is the true stored value.
+      cap: null,
+      kill_condition: null,
       created_at: '2026-07-20T00:00:00Z',
     },
   ];

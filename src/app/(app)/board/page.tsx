@@ -56,6 +56,37 @@ interface BoardAnalysis {
   superseded: boolean;
 }
 
+/**
+ * Whether this post has a mirrored thumbnail in the private bucket, and how to
+ * read it. Three states, because the bucket can only prove two of them: an
+ * object is there, an object is not there, or the listing that would have said
+ * could not be read. The third is `null` and renders as an em-dash with its
+ * reason — never as "no image", which would be a fact nobody measured.
+ *
+ * `src` is `/api/assets?path=…`: an operator-gated route that 307s to a
+ * five-minute signed URL minted on the server. The signed URL itself never
+ * reaches this bundle, which is the whole reason the Board reads images this
+ * way instead of holding a URL of its own (hard rule 4).
+ */
+interface PostMedia {
+  mirrored: boolean | null;
+  path: string | null;
+  src: string | null;
+}
+
+/** The image state of the cards on screen, as the route measured it. */
+interface MediaRead {
+  /** MIRROR_MEDIA, as the server reads it. The flag, never a secret's value. */
+  enabled: boolean;
+  index_complete: boolean;
+  index_error: string | null;
+  /** Cards examined. The three counts below sum to it. */
+  examined: number;
+  mirrored: number;
+  not_mirrored: number;
+  unknown: number;
+}
+
 interface BoardPost {
   id: string;
   /** The scrape this row came from. Returned because the board reads one row per post. */
@@ -80,6 +111,8 @@ interface BoardPost {
   /** Video plays, when the actor returned one. Null on non-video posts and on older rows. */
   video_play_count: number | null;
   analysis: BoardAnalysis | null;
+  /** Whether a mirrored thumbnail exists for this post. See PostMedia above. */
+  media: PostMedia;
 }
 
 interface BoardTotals {
@@ -115,6 +148,7 @@ interface BoardResponse {
   totals: BoardTotals;
   analyses: AnalysesRead;
   population: PopulationScan;
+  media: MediaRead;
 }
 
 /**
@@ -242,6 +276,107 @@ function TopComment({ post }: { post: BoardPost }) {
 }
 
 /**
+ * The image slot on a card — which today, on every card, is the no-image state.
+ *
+ * WHY IT SITS BELOW THE CAPTION. The caption-first card was a deliberate v2
+ * decision and this does not reverse it: the caption still leads, and the image
+ * supports it. That ordering also means the DEFAULT case — no image — changes
+ * the card by exactly one quiet line rather than by an empty grey box where a
+ * picture is supposed to be. Nothing here is mirrored today: `posts.raw` is null
+ * on all 320 stored rows, so the June CDN URLs have nothing to mirror FROM until
+ * a refresh scrape runs, and MIRROR_MEDIA is off by default besides.
+ *
+ * FOUR STATES, AND NONE OF THEM IS A BROKEN IMAGE.
+ *
+ *   mirrored, loads      -> the thumbnail
+ *   mirrored, won't load -> the object exists; this browser could not read it
+ *   not mirrored         -> em-dash, with WHICH reason: the flag is off, or the
+ *                           flag is on and there was nothing left to copy
+ *   index unreadable     -> em-dash, said as unknown — not as "no image"
+ *
+ * An <img> is rendered ONLY in the first case, because `src` is populated only
+ * when the bucket listing proved the object is there. That is what keeps the
+ * browser's broken-image glyph off this screen: it is never asked to fetch
+ * something that was not confirmed to exist (hard rule 2 — absent renders as an
+ * em-dash, never as a zero and never as a failure the user has to interpret).
+ */
+function PostMediaSlot({ post, enabled }: { post: BoardPost; enabled: boolean | null }) {
+  const { tt } = useLocale();
+  const [failed, setFailed] = useState(false);
+
+  const src = post.media.src;
+
+  if (post.media.mirrored === true && src !== null && !failed) {
+    return (
+      <div style={{ lineHeight: 0 }}>
+        {/* Plain <img>: /api/assets is an operator-gated redirect, not a
+            configured next/image remote host. Same call the Brand screen makes. */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={src}
+          /* Factual, not descriptive: this app transcribes images, it does not
+             invent captions for them. The alt names the post, nothing more. */
+          alt={tt(`صورة مُرآة للمنشور ${post.ig_id}`, `Mirrored thumbnail for post ${post.ig_id}`)}
+          loading="lazy"
+          decoding="async"
+          onError={() => setFailed(true)}
+          style={{
+            width: '100%',
+            aspectRatio: '1 / 1',
+            objectFit: 'cover',
+            borderRadius: 8,
+            border: '1px solid var(--tq-line)',
+            background: 'var(--tq-line)',
+          }}
+        />
+      </div>
+    );
+  }
+
+  const label = failed
+    ? tt('الصورة لم تُحمَّل', 'Image did not load')
+    : post.media.mirrored === null
+      ? tt('حالة الصورة غير معروفة', 'Image state unknown')
+      : tt('لا صورة مُرآة', 'No mirrored image');
+
+  const reason = failed
+    ? tt(
+        'الكائن موجود في التخزين، لكن المتصفح لم يستطع قراءته. القراءة تمرّ عبر ‎/api/assets وتتطلّب جلسة مشغِّل، والرابط الموقَّع ينتهي خلال خمس دقائق — أعد تحميل الصفحة.',
+        'The object is in storage, but this browser could not read it. The read goes through /api/assets, needs an operator session, and the signed URL it redirects to expires in five minutes — reload the page.',
+      )
+    : post.media.mirrored === null
+      ? tt(
+          'تعذّرت قراءة فهرس التخزين، فحالة صورة هذا المنشور غير معروفة — وهذا ليس نفيَ وجود صورة.',
+          'The storage listing could not be read, so this post’s image state is unknown — which is not the same as saying it has no image.',
+        )
+      : enabled === true
+        ? tt(
+            'التدوير مفعَّل ولا يوجد كائن لهذا المنشور: إمّا أن حمولته لا تحمل رابط صورة، أو أن رابط الشبكة انتهت صلاحيته قبل أن تعمل النسخة.',
+            'Mirroring is on and no object exists for this post: either its payload carries no image URL, or the CDN link had expired before the pass ran.',
+          )
+        : enabled === false
+          ? tt(
+              'MIRROR_MEDIA غير مفعَّل، فلم تُنسخ أي صورة إلى التخزين. البطاقة تبدأ بالنص، وهذا هو الوضع الافتراضي.',
+              'MIRROR_MEDIA is not enabled, so no image has been copied into storage. The card leads with its caption — that is the default, not a failure.',
+            )
+          : // The flag was not in this render's data. Stating the absence is
+            // honest; guessing which cause produced it would not be.
+            tt(
+              'لا يوجد كائن صورة لهذا المنشور في التخزين.',
+              'No image object exists for this post in storage.',
+            );
+
+  return (
+    <Tooltip title={reason}>
+      <span className="tq-muted" style={{ fontSize: 12 }}>
+        <span className="tq-num">—</span>
+        {` ${label}`}
+      </span>
+    </Tooltip>
+  );
+}
+
+/**
  * When the frozen tags above it were computed, and whether they describe the
  * scrape now on screen.
  *
@@ -298,12 +433,42 @@ function BoardCoverage({
   totals,
   population,
   analyses,
+  media,
 }: {
   totals: BoardTotals;
   population: PopulationScan;
   analyses: AnalysesRead;
+  media: MediaRead;
 }) {
   const { tt } = useLocale();
+
+  // Every figure below is rendered verbatim from the route's own count — this
+  // screen does no arithmetic on them, so what is on the card is what was
+  // measured, under the key the response returned it under (rule 12).
+  const imageNote = !media.index_complete
+    ? media.index_error === null
+      ? tt(
+          'فهرس الصور لم يُقرأ بالكامل، فبعض البطاقات تقول "غير معروف" بدل نفي وجود صورة.',
+          'The image listing was not read in full, so some cards say “unknown” rather than claiming no image exists.',
+        )
+      : tt(
+          `تعذّرت قراءة فهرس الصور (${media.index_error})، فحالة الصور غير معروفة على البطاقات المعنيّة.`,
+          `The image listing could not be read (${media.index_error}), so those cards report an unknown image state.`,
+        )
+    : media.enabled
+      ? tt(
+          'MIRROR_MEDIA مفعَّل: كل منشور له كائن في التخزين تُعرض صورته، والباقي لم يكن لديه ما يُنسخ.',
+          'MIRROR_MEDIA is on: every post with an object in storage shows it, and the rest had nothing to copy.',
+        )
+      : media.mirrored > 0
+        ? tt(
+            'MIRROR_MEDIA غير مفعَّل الآن؛ الصور المعروضة نُسخت في تشغيل سابق.',
+            'MIRROR_MEDIA is off now; the images shown were copied by an earlier run.',
+          )
+        : tt(
+            'MIRROR_MEDIA غير مفعَّل، فلا صور منسوخة — البطاقات تبدأ بالنص، وهذا هو التصميم الافتراضي.',
+            'MIRROR_MEDIA is off, so no images are stored — cards lead with their captions, which is the intended default.',
+          );
 
   return (
     <Card size="small" title={tt('ما تغطّيه هذه اللوحة', 'What this board covers')} style={{ marginBlockEnd: 16 }}>
@@ -370,6 +535,56 @@ function BoardCoverage({
             <span className="tq-num">{formatNumber(totals.account_avg.academy)}</span>
           </Descriptions.Item>
         </Descriptions>
+
+        {/* The images, counted over the cards on screen rather than over the
+            whole corpus — these are the cards that ask for one. The three
+            states are shown apart because "no object" and "could not tell"
+            are different findings, and collapsing them would invent the
+            stronger one. */}
+        <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }}>
+          <Descriptions.Item
+            label={
+              <Tooltip
+                title={tt(
+                  'منشورات هذا العرض التي لها كائن صورة في التخزين الخاص، مقروءة من التخزين نفسه لا من الصفوف.',
+                  'Posts in this view with an image object in private storage, read from storage itself rather than from the rows.',
+                )}
+              >
+                {tt('صور مُرآة (هذا العرض)', 'Mirrored images (this view)')}
+              </Tooltip>
+            }
+          >
+            <span className="tq-num">{formatNumber(media.mirrored)}</span>
+            {' / '}
+            <span className="tq-num">{formatNumber(media.examined)}</span>
+          </Descriptions.Item>
+          <Descriptions.Item label={tt('بلا كائن صورة', 'No image object')}>
+            <span className="tq-num">{formatNumber(media.not_mirrored)}</span>
+          </Descriptions.Item>
+          <Descriptions.Item
+            label={
+              <Tooltip
+                title={tt(
+                  'بطاقات تعذّر التحقّق من صورتها — ليست "بلا صورة".',
+                  'Cards whose image could not be checked — this is not “no image”.',
+                )}
+              >
+                {tt('غير معروف', 'Unknown')}
+              </Tooltip>
+            }
+          >
+            <span className="tq-num">{formatNumber(media.unknown)}</span>
+          </Descriptions.Item>
+          <Descriptions.Item label="MIRROR_MEDIA">
+            <Tag color={media.enabled ? 'green' : 'default'}>
+              {media.enabled ? tt('مفعَّل', 'On') : tt('غير مفعَّل', 'Off')}
+            </Tag>
+          </Descriptions.Item>
+        </Descriptions>
+
+        <div className="tq-muted" style={{ fontSize: 12 }}>
+          {imageNote}
+        </div>
 
         {population.truncated ? (
           <div className="tq-muted" style={{ fontSize: 12 }}>
@@ -464,6 +679,7 @@ export default function BoardPage() {
   const [totals, setTotals] = useState<BoardTotals | null>(null);
   const [population, setPopulation] = useState<PopulationScan | null>(null);
   const [analysesRead, setAnalysesRead] = useState<AnalysesRead | null>(null);
+  const [mediaRead, setMediaRead] = useState<MediaRead | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ message: string; hint: string | null } | null>(null);
 
@@ -490,6 +706,7 @@ export default function BoardPage() {
       setTotals(data.totals);
       setPopulation(data.population);
       setAnalysesRead(data.analyses);
+      setMediaRead(data.media);
     } catch (err) {
       setError(describeError(err));
     } finally {
@@ -689,8 +906,13 @@ export default function BoardPage() {
         </Space>
       </Card>
 
-      {totals && population && analysesRead ? (
-        <BoardCoverage totals={totals} population={population} analyses={analysesRead} />
+      {totals && population && analysesRead && mediaRead ? (
+        <BoardCoverage
+          totals={totals}
+          population={population}
+          analyses={analysesRead}
+          media={mediaRead}
+        />
       ) : null}
 
       {loading ? (
@@ -729,6 +951,12 @@ export default function BoardPage() {
                   ) : (
                     <span className="tq-muted">—</span>
                   )}
+
+                  {/* Caption first, image second — the v2 card ordering, kept.
+                      With no image this is one muted line; with one it is the
+                      thumbnail. `enabled` comes from the route, so the card can
+                      say WHY it has no image instead of merely that it has none. */}
+                  <PostMediaSlot post={post} enabled={mediaRead?.enabled ?? null} />
 
                   <Descriptions size="small" column={2}>
                     <Descriptions.Item label={tt('التفاعل', 'Engagement')}>

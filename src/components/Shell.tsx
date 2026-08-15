@@ -20,6 +20,7 @@ import {
   TeamOutlined,
   ReadOutlined,
   SafetyCertificateOutlined,
+  SolutionOutlined,
 } from '@ant-design/icons';
 import { useLocale } from '@/lib/i18n/LocaleContext';
 import { useQuality } from '@/components/Providers';
@@ -45,6 +46,9 @@ export function Shell({ email, children }: { email: string; children: React.Reac
     { key: '/calendar', icon: <CalendarOutlined />, label: t.nav.calendar },
     { key: '/reports', icon: <FileTextOutlined />, label: t.nav.reports },
     { key: '/digest', icon: <AuditOutlined />, label: tt('التقرير الأسبوعي', 'Weekly digest') },
+    // Directly under the digest: the ledger is what the digest is accountable
+    // to, and a decision nobody judged stays open and stays visible.
+    { key: '/decisions', icon: <SolutionOutlined />, label: tt('سجل القرارات', 'Decision ledger') },
     { key: '/board', icon: <TableOutlined />, label: t.nav.board },
     // Labelled inline rather than from dict.ts: the dictionary is shared with
     // other work in flight, and this screen needs exactly one new string.

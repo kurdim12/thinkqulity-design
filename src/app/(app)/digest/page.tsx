@@ -182,6 +182,9 @@ interface DigestEstimate {
   output_tokens_ceiling: number;
   chars_per_token: number;
   usd: number | null;
+  /** The published rates the ceiling was multiplied by. Null when unpriced. */
+  rate_in_per_mtok: number | null;
+  rate_out_per_mtok: number | null;
   unpriced_reason: string | null;
 }
 
@@ -792,10 +795,41 @@ function EstimateDetail({ estimate }: { estimate: DigestEstimate }) {
           ' characters per token — that divisor is an assumption, not a measurement.',
         )}
       </li>
+      {/*
+        THE FIGURE IS READ FROM `estimate.usd`, NOT PRINTED AS A GLYPH.
+
+        This line used to render a literal em-dash with no reference to
+        `estimate.usd` at all, so the moment the route learned to price a run
+        the screen would still have shown "—" — a quantity the surface asserted
+        rather than sourced, which is exactly what hard rule 12 forbids. The
+        em-dash is now a CONSEQUENCE of `usd === null`, and when it appears the
+        route's own reason appears with it (hard rule 2: absent is an em-dash
+        with its reason, never 0 and never an unexplained dash).
+      */}
       <li>
-        {tt('التكلفة بالدولار: ', 'Cost in dollars: ')}
-        <span className="tq-num">—</span>
-        {estimate.unpriced_reason === null ? null : <> — {estimate.unpriced_reason}</>}
+        {tt('سقف التكلفة بالدولار: ', 'Cost ceiling in dollars: ')}
+        {estimate.usd === null ? (
+          <>
+            <span className="tq-num">—</span>
+            {estimate.unpriced_reason === null ? null : <> — {estimate.unpriced_reason}</>}
+          </>
+        ) : (
+          <>
+            <span className="tq-num">${estimate.usd.toFixed(2)}</span>
+            {estimate.rate_in_per_mtok === null || estimate.rate_out_per_mtok === null ? null : (
+              <>
+                {tt(' — بسعر ', ' — at ')}
+                <span className="tq-num">${estimate.rate_in_per_mtok}</span>
+                {tt(' إدخال و', ' in and ')}
+                <span className="tq-num">${estimate.rate_out_per_mtok}</span>
+                {tt(
+                  ' إخراج لكل مليون رمز، من الأسعار المنشورة في src/lib/agent/rates.ts.',
+                  ' out per million tokens, from the published rates in src/lib/agent/rates.ts.',
+                )}
+              </>
+            )}
+          </>
+        )}
       </li>
     </ul>
   );

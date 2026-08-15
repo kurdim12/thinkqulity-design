@@ -34,6 +34,14 @@ export type EnvKey =
   | 'COMMENTS_TOP_N'
   | 'COMMENTS_PER_POST'
   | 'MIRROR_MEDIA'
+  // Optional. The MCP server (src/app/api/mcp/route.ts). MCP_ACCESS_TOKEN is the
+  // ONLY credential that endpoint accepts; unset it and the endpoint refuses
+  // every call, which is the intended off state. An unset secret is a closed
+  // door, never an open one.
+  | 'MCP_ACCESS_TOKEN'
+  // Optional. Hard rule 14 — external callers cannot spend freely. The ceiling
+  // on model-backed generations an MCP caller can trigger per Asia/Amman day.
+  | 'MCP_DAILY_GENERATION_CAP'
   // Optional overrides — the two model tiers behind the header quality switch.
   | 'AI_MODEL_STANDARD'
   | 'AI_MODEL_QUALITY'
@@ -354,6 +362,23 @@ const ENV_SPECS: Record<EnvKey, EnvSpec> = {
     placement: 'var',
     what: 'mirrors post media into storage; off unless explicitly enabled',
   },
+
+  /* -- optional: the MCP server ------------------------------------------ */
+  MCP_ACCESS_TOKEN: {
+    // A bearer token is a credential. It is never echoed (it is absent from
+    // ECHOABLE_VALUES below), and no check in this file reports its length,
+    // prefix or shape: checkRequiredEnv() is meant to be readable from an
+    // UNAUTHENTICATED diagnostic route, so anything it says about this key is
+    // said to the public. "Set" or "not bound" is the whole vocabulary.
+    requirement: 'optional',
+    placement: 'secret',
+    what: 'the only credential /api/mcp accepts; unset means the endpoint refuses every call',
+  },
+  MCP_DAILY_GENERATION_CAP: {
+    requirement: 'optional',
+    placement: 'var',
+    what: 'model-backed generations an MCP caller may trigger per Asia/Amman day; unset uses the conservative built-in default',
+  },
 };
 
 /**
@@ -384,6 +409,9 @@ const ECHOABLE_VALUES: ReadonlySet<EnvKey> = new Set<EnvKey>([
   'COMMENTS_TOP_N',
   'COMMENTS_PER_POST',
   'MIRROR_MEDIA',
+  // The cap is a policy number an operator needs to read back. The token it
+  // sits beside is deliberately NOT here.
+  'MCP_DAILY_GENERATION_CAP',
 ]);
 
 /** False for every credential. Never show a value this returns false for. */
@@ -444,6 +472,21 @@ function usabilityProblem(key: EnvKey): string | null {
     return allowedEmails().length === 0
       ? 'set, but no entry contains "@" — the allowlist parses to nobody, so no one can sign in'
       : null;
+  }
+
+  if (key === 'MCP_DAILY_GENERATION_CAP') {
+    // Set-but-unparseable is the trap here, and it is a quiet one:
+    // `positiveIntEnv` falls back to its default, so a cap typed as "20 " with
+    // a stray character, as "20.5", or as "-1" silently becomes the built-in
+    // number and the operator believes a ceiling is in force that is not the
+    // one they wrote. Absence is fine and is reported separately; this branch
+    // only judges a present value.
+    const raw = optionalEnv(key);
+    if (raw === null) return null;
+    const parsed = Number(raw);
+    return Number.isInteger(parsed) && parsed > 0
+      ? null
+      : 'set, but is not a positive whole number — the built-in default is being used instead of the value you wrote';
   }
 
   if (key === 'NEXT_PUBLIC_SUPABASE_URL') {

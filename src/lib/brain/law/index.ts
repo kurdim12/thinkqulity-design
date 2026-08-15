@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import { fail, pass, type LawResult } from './types.ts';
 import { paletteClaims, paletteRefs } from './palette-claims.ts';
+import { paletteMatch, type MeasuredColors } from './palette-match.ts';
 import { claimsLinter } from './claims-linter.ts';
 import { registerScore } from './register-score.ts';
 import { frameStructure, guidelineStructure, type FrameLike, type GuidelineSection } from './structure.ts';
@@ -8,6 +9,8 @@ import { sourceKeys, type SourceKeysInput } from './source-keys.ts';
 
 export * from './types.ts';
 export { paletteClaims, paletteRefs, claimsLinter, registerScore, guidelineStructure, frameStructure };
+export { paletteMatch, canonicalHex, colorDistance, NEAR_MATCH_MAX_DISTANCE } from './palette-match.ts';
+export type { MeasuredColors, PaletteMatchResult } from './palette-match.ts';
 export { REQUIRED_SECTIONS, TBD_AR } from './structure.ts';
 export type { GuidelineSection, FrameLike } from './structure.ts';
 export { profile } from './register-score.ts';
@@ -40,6 +43,17 @@ export interface LawInput {
    * simply does not get this check rather than getting a vacuous pass.
    */
   sourceKeys?: SourceKeysInput;
+  /**
+   * Colours COUNTED out of an image by src/lib/vision/colors.ts. Supplied only
+   * by paths that actually measured an image; an unmeasured post does not get
+   * the check rather than getting a vacuous pass.
+   *
+   * `runLaw` surfaces the LawResult here alongside every other check. The
+   * `PaletteMatch` object destined for `visual_features.palette_match` comes
+   * from calling `paletteMatch()` directly — a report of verdicts is not the
+   * place to also hand back a database row.
+   */
+  measuredColors?: MeasuredColors;
 }
 
 export interface LawReport {
@@ -75,6 +89,9 @@ export function runLaw(input: LawInput): LawReport {
   }
   if (input.guidelineSections !== undefined) {
     results.push(guidelineStructure(input.guidelineSections));
+  }
+  if (input.measuredColors !== undefined) {
+    results.push(paletteMatch(input.measuredColors, input.swatches).law);
   }
 
   const violations = results.filter((r) => !r.passed && r.severity === 'violation');

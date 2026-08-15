@@ -26,16 +26,24 @@ import type { Account } from '@/lib/types/db';
  * touches an account. It is the same act as the scrape that produced the row,
  * one step further along.
  *
- * WHERE IT IS READ FROM. Nowhere new. Objects land in the same private
- * `brand-assets` bucket that /api/assets already fronts, so a mirrored
- * thumbnail is read exactly the way a stored raw payload already is:
- * `/api/assets?path=post-media/<account>/<ig_id>`, which calls
+ * WHERE IT IS READ FROM. No new ROUTE, and — since v4 — a real reader. Objects
+ * land in the same private `brand-assets` bucket that /api/assets already
+ * fronts, so a mirrored thumbnail is read exactly the way a stored raw payload
+ * already is: `/api/assets?path=post-media/<account>/<ig_id>`, which calls
  * `requireOperator()` and 307-redirects to a signed URL that expires in five
  * minutes. RULE 4 holds because of that shape: the signed URL is minted inside
  * that route and handed to the browser as a redirect. It is never returned as
  * JSON, never rendered into HTML, and nothing in this module mints one — so no
  * signed URL can reach a client bundle. A separate /api/media route would be a
  * second copy of /api/assets with the same body, which is why there isn't one.
+ *
+ * THE READER SHIPS WITH THE WRITER. v3 built this pass and nothing rendered it,
+ * which is why the v3 review said to drop it: a flag whose behaviour no surface
+ * shows is indistinguishable from a flag that does nothing. readMirrorIndex()
+ * below is the other half — /api/board asks it which posts actually have an
+ * object and hands each card either the /api/assets query for it or the reason
+ * there is none. The bucket listing is the ONLY source of that answer: nothing
+ * infers "there is an image" from a row, a flag or a URL that used to resolve.
  *
  * FAILURE IS NORMAL HERE. Expired URLs are the reason this module exists, so a
  * download that 403s is an expected outcome, not an error: that post degrades
@@ -207,6 +215,12 @@ export interface MirrorMediaResult {
    * never wrong, and said out loud rather than assumed away.
    */
   index_complete: boolean;
+  /**
+   * Why the listing was incomplete, when storage said so in words. Null when
+   * every listing answered, and null when it merely ran out of pages — those are
+   * different facts, and "incomplete" without a reason is the weaker one.
+   */
+  index_error: string | null;
   /** An unexpected failure that ended the pass early. Null on a clean pass. */
   error: string | null;
   /** One readable line per non-zero outcome, in the parser's house style. */
@@ -325,31 +339,173 @@ async function pool<T>(
   await Promise.all(runners);
 }
 
-/**
- * Object names already under `post-media/<account>/`, so a post that has been
- * mirrored before is never downloaded again. Returns `complete: false` when the
- * listing hit its page bound, because a partial index can only cause extra
- * work, never a wrong answer, and the caller reports which it got.
+/* ============================================================ THE READER ==
+ *
+ * What the bucket holds for one account, and what that does NOT tell you.
+ *
+ * `complete` is the whole point of this shape. A listing that answered every
+ * page proves both halves: a name present means an object exists, and a name
+ * absent means one does not. A listing that failed, or that ran out of its page
+ * bound, proves only the first — absence is then UNKNOWN, not false. The writer
+ * can treat unknown as "download it again" (wasteful, never wrong); a reader
+ * cannot treat it as "there is no image", because that is a claim about the
+ * post, and it would be one this module never measured (hard rule 2).
  */
-async function mirroredNames(
-  db: SupabaseClient,
-  account: Account,
-): Promise<{ names: Set<string>; complete: boolean }> {
-  const names = new Set<string>();
-  for (let page = 0; page < MAX_INDEX_PAGES; page += 1) {
-    const { data, error } = await db.storage
-      .from(BUCKET)
-      .list(`${PREFIX}/${account}`, { limit: INDEX_PAGE, offset: page * INDEX_PAGE });
+export interface MirrorIndexEntry {
+  /** Object names under `post-media/<account>/`. Each one is an ig_id. */
+  names: Set<string>;
+  /** True only when every page of the listing was read. */
+  complete: boolean;
+  /** What storage said when it refused. Null when it never refused. */
+  error: string | null;
+}
 
-    // A missing prefix lists as empty; a real failure means the index is
-    // unknown, and an unknown index is reported as incomplete rather than
-    // assumed empty — assuming empty would re-download the whole account.
-    if (error) return { names, complete: false };
-    const batch = data ?? [];
-    for (const object of batch) names.add(object.name);
-    if (batch.length < INDEX_PAGE) return { names, complete: true };
+/** The same answer across several accounts, plus the two facts rolled up. */
+export interface MirrorIndex {
+  accounts: Map<Account, MirrorIndexEntry>;
+  /** True when every account's listing was complete. */
+  complete: boolean;
+  /** The first refusal, verbatim. Null when nothing refused. */
+  error: string | null;
+}
+
+/**
+ * One account's object names, paged to MAX_INDEX_PAGES.
+ *
+ * IT NEVER THROWS, and that is a reader requirement rather than a writer one.
+ * The mirror pass runs inside a try/catch that turns anything into a counted
+ * outcome, so a throw here was survivable; /api/board calls this while
+ * assembling a screen whose entire other content — captions, engagement,
+ * analyses — is already in hand. Failing that request because a thumbnail
+ * listing timed out would trade the whole board for the images. So a throw
+ * becomes `complete: false` with the message, exactly like a refusal, and every
+ * card whose name is not in the (possibly empty) set reports "unknown".
+ */
+async function listMirrored(db: SupabaseClient, account: Account): Promise<MirrorIndexEntry> {
+  const names = new Set<string>();
+  try {
+    for (let page = 0; page < MAX_INDEX_PAGES; page += 1) {
+      const { data, error } = await db.storage
+        .from(BUCKET)
+        .list(`${PREFIX}/${account}`, { limit: INDEX_PAGE, offset: page * INDEX_PAGE });
+
+      // A missing prefix lists as empty — which is a complete answer, and the
+      // answer today: nothing has ever been mirrored. A real failure means the
+      // index is unknown, and an unknown index is reported as incomplete rather
+      // than assumed empty; assuming empty would re-download the whole account
+      // on the write side and claim "no image" on the read side.
+      if (error) return { names, complete: false, error: error.message };
+      const batch = data ?? [];
+      for (const object of batch) names.add(object.name);
+      if (batch.length < INDEX_PAGE) return { names, complete: true, error: null };
+    }
+  } catch (err) {
+    return { names, complete: false, error: err instanceof Error ? err.message : String(err) };
   }
-  return { names, complete: false };
+  // Out of pages, with nothing refused: the names gathered are real, the ones
+  // beyond the bound are unknown.
+  return { names, complete: false, error: null };
+}
+
+/**
+ * Which posts of these accounts have a mirrored object.
+ *
+ * One listing per DISTINCT account — two, at this corpus — regardless of how
+ * many posts the caller is about to ask about. That is why the index is built
+ * once and passed to postMediaFor() per post, rather than each post asking
+ * storage about itself: 320 cards would otherwise be 320 subrequests, and a
+ * Workers invocation has 1,000.
+ *
+ * Passing no accounts issues no requests and returns a complete, empty index —
+ * which is the honest answer for a board that is showing no posts.
+ */
+export async function readMirrorIndex(
+  db: SupabaseClient,
+  accounts: readonly Account[],
+): Promise<MirrorIndex> {
+  const index: MirrorIndex = { accounts: new Map(), complete: true, error: null };
+
+  for (const account of new Set<Account>(accounts)) {
+    const entry = await listMirrored(db, account);
+    index.accounts.set(account, entry);
+    if (!entry.complete) index.complete = false;
+    if (entry.error !== null && index.error === null) index.error = entry.error;
+  }
+
+  return index;
+}
+
+/**
+ * What one post's card is allowed to say about its image.
+ *
+ * THREE STATES, NOT TWO. `mirrored` is a boolean OR NULL, and the null is the
+ * reason this type exists: "the index could not be read" is not "there is no
+ * image", and a card that renders them identically has invented a fact about
+ * the post. `src` is populated only in the proven case, so a caller cannot
+ * render an <img> at a path that was never confirmed to hold bytes — which is
+ * how a broken-image icon reaches a screen (hard rule 2 again: the placeholder
+ * is designed, the browser's broken glyph is not).
+ *
+ * `path` is the object name this post's thumbnail would occupy whether or not
+ * it holds one, so the quantity on screen has its key available on inspection
+ * (rule 12) — an operator can read a card's path straight back through
+ * /api/assets and see the same object the mirror wrote.
+ */
+export interface PostMedia {
+  /** true = an object exists. false = none does. null = the index is unknown. */
+  mirrored: boolean | null;
+  /** `post-media/<account>/<ig_id>`, or null when the ig_id cannot name one. */
+  path: string | null;
+  /**
+   * The auth-gated /api/assets query, ONLY when `mirrored` is true. Never a
+   * signed URL: this is a route path, and the signed URL is minted inside that
+   * route after requireOperator() and handed over as a 307 (rule 4).
+   */
+  src: string | null;
+}
+
+/** One post's image state, read off an index built by readMirrorIndex(). */
+export function postMediaFor(index: MirrorIndex, account: Account, igId: string): PostMedia {
+  const path = mirrorPathFor(account, igId);
+  // No path can be derived, so no object can exist under one. That is a proven
+  // false rather than an unknown — the writer refuses the same ids for the same
+  // reason, so there is nowhere for bytes to be hiding.
+  if (path === null) return { mirrored: false, path: null, src: null };
+
+  const entry = index.accounts.get(account);
+  // The account was never listed, so nothing was measured about it.
+  if (entry === undefined) return { mirrored: null, path, src: null };
+
+  if (entry.names.has(igId)) return { mirrored: true, path, src: mirrorReadPath(path) };
+  // Absence only counts as an answer when the listing was complete.
+  return entry.complete
+    ? { mirrored: false, path, src: null }
+    : { mirrored: null, path, src: null };
+}
+
+/**
+ * The three counts a surface may show, over the posts it is actually showing.
+ *
+ * All three are MEASURED — every post lands in exactly one of them and they sum
+ * to `examined` — so none of them is a zero standing in for an absence. When the
+ * index was partial, that shows up as `unknown` rising rather than as `mirrored`
+ * quietly under-reporting a total it could not know.
+ */
+export interface MirrorCoverage {
+  examined: number;
+  mirrored: number;
+  not_mirrored: number;
+  unknown: number;
+}
+
+export function mirrorCoverage(media: readonly PostMedia[]): MirrorCoverage {
+  const coverage: MirrorCoverage = { examined: media.length, mirrored: 0, not_mirrored: 0, unknown: 0 };
+  for (const entry of media) {
+    if (entry.mirrored === true) coverage.mirrored += 1;
+    else if (entry.mirrored === false) coverage.not_mirrored += 1;
+    else coverage.unknown += 1;
+  }
+  return coverage;
 }
 
 /** Turns the counters into lines an operator can act on. */
@@ -405,7 +561,9 @@ function describe(result: MirrorMediaResult): string[] {
   }
   if (!result.index_complete) {
     lines.push(
-      'The already-mirrored listing was incomplete, so this pass may have re-downloaded objects it already had.',
+      result.index_error === null
+        ? 'The already-mirrored listing was incomplete, so this pass may have re-downloaded objects it already had.'
+        : `The already-mirrored listing was incomplete (${result.index_error}), so this pass may have re-downloaded objects it already had.`,
     );
   }
   if (result.error !== null) {
@@ -450,6 +608,7 @@ function disabledResult(considered: number | null, cap: number): MirrorMediaResu
     failed: { download: 0, not_image: 0, too_large: 0, upload: 0 },
     bytes_stored: 0,
     index_complete: true,
+    index_error: null,
     error: null,
     warnings: [],
   };
@@ -519,6 +678,7 @@ export async function mirrorPostMedia(
     failed: { download: 0, not_image: 0, too_large: 0, upload: 0 },
     bytes_stored: 0,
     index_complete: true,
+    index_error: null,
     error: null,
     warnings: [],
   };
@@ -542,16 +702,20 @@ export async function mirrorPostMedia(
     }
 
     /* --- 2. drop the ones the bucket already holds ------------------------ */
-    const accounts = [...new Set(eligible.map((entry) => entry.account))];
-    const index = new Map<Account, Set<string>>();
-    for (const account of accounts) {
-      const listed = await mirroredNames(db, account);
-      index.set(account, listed.names);
-      if (!listed.complete) result.index_complete = false;
-    }
+    // The same index the Board reads. One implementation, so "this post has an
+    // image" cannot mean one thing to the writer and another to the reader.
+    const index = await readMirrorIndex(
+      db,
+      eligible.map((entry) => entry.account),
+    );
+    result.index_complete = index.complete;
+    result.index_error = index.error;
 
     const work = eligible.filter((entry) => {
-      if (index.get(entry.account)?.has(entry.name) === true) {
+      // A name PRESENT is proof, whether or not the listing finished; only
+      // absence needs a complete listing, and treating an unknown absence as a
+      // re-download is the wasteful-never-wrong half of the contract.
+      if (index.accounts.get(entry.account)?.names.has(entry.name) === true) {
         result.already_mirrored += 1;
         return false;
       }

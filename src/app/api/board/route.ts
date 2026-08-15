@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireOperator, errorResponse } from '@/lib/auth';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { computeStats, type BoardStats } from '@/lib/board/compute';
+import { indexAnalysesByPost } from '@/lib/board/identity';
 import {
   distinctPosts,
   scanCoverage,
@@ -9,6 +10,12 @@ import {
   type DistinctPostsResult,
   type PostIdentity,
 } from '@/lib/audience/posts';
+import {
+  readMirrorIndex,
+  postMediaFor,
+  mirrorCoverage,
+  mirrorMediaEnabled,
+} from '@/lib/ingest/media';
 import type { PostRow } from '@/lib/types/db';
 
 export const dynamic = 'force-dynamic';
@@ -33,9 +40,14 @@ export const dynamic = 'force-dynamic';
 // prettier-ignore
 const BOARD_POST_COLUMNS = 'id, snapshot_id, account, ig_id, url, caption, media_type, likes, comments, engagement, posted_at, rank, first_comment, video_play_count';
 
-/** Exactly the fields `AnalysisRow` below declares — no `select('*')` here either. */
+/**
+ * Exactly the fields `AnalysisRow` below declares — no `select('*')` here
+ * either. `ig_id` is read because it is now the JOIN: see the note above
+ * indexAnalysesByPost() in src/lib/board/identity.ts for why the row id it sits
+ * beside is no longer enough on its own.
+ */
 // prettier-ignore
-const ANALYSIS_COLUMNS = 'post_id, computed, cluster_label, explanation, grounding, model, created_at';
+const ANALYSIS_COLUMNS = 'post_id, ig_id, computed, cluster_label, explanation, grounding, model, created_at';
 
 /** Splits `'a, b, c'` into the union `'a' | 'b' | 'c'`. */
 type SplitColumns<S extends string> = S extends `${infer Head}, ${infer Rest}`
@@ -70,6 +82,8 @@ const statsOf = computeStats as (posts: readonly BoardPostRow[]) => BoardStats;
 
 interface AnalysisRow {
   post_id: string;
+  /** The post this analysis describes. Nullable column; see identity.ts. */
+  ig_id: string | null;
   computed: Record<string, number | null>;
   cluster_label: string | null;
   explanation: string | null;
@@ -150,71 +164,23 @@ function byEngagement<T extends PostIdentity & { engagement: number }>(posts: re
 
 /* ------------------------------------------- an analysis follows the POST --- */
 
-/** An analysis, resolved to the post it describes rather than the row it cites. */
-interface AnalysisLink {
-  analysis: AnalysisRow;
-  /**
-   * True when the analysis was written against an EARLIER scrape of this post.
-   * A different fact from "never analysed", and the whole point of the index
-   * below: conflating the two is what re-charges the operator for work already
-   * paid for.
-   */
-  superseded: boolean;
-}
-
-/** `Date.parse` of an unusable timestamp is NaN; sort such a row oldest. */
-function millis(iso: string): number {
-  const at = Date.parse(iso);
-  return Number.isNaN(at) ? Number.NEGATIVE_INFINITY : at;
-}
-
-/** An analysis on the row now shown beats one on a superseded row; then newest. */
-function beats(candidate: AnalysisLink, held: AnalysisLink): boolean {
-  if (candidate.superseded !== held.superseded) return held.superseded;
-  return millis(candidate.analysis.created_at) > millis(held.analysis.created_at);
-}
-
 /**
- * Analyses keyed by the POST they describe, not by the scrape row they cite.
+ * The pre-0004 bridge, and nothing more.
  *
- * `post_analyses.post_id` references `posts.id` — the ROW. `posts` is UNIQUE
- * (snapshot_id, ig_id), so a re-scrape gives every post a second row with a NEW
- * uuid, and distinctPosts() hands the win to that new row. Keyed by row id, an
- * analysis written before the re-scrape therefore matches nothing: the card
- * reads "not analysed yet", the count reads 0, and the estimate re-quotes the
- * whole board for work that is sitting in `post_analyses` unshown.
+ * An analysis names its post directly now (`post_analyses.ig_id`, added and
+ * backfilled by migration 0004), so the match no longer depends on this map.
+ * Rows written before that column existed carry null, and the only place their
+ * ig_id can be recovered from is the scrape rows this request already read —
+ * which is a CAPPED read, and inheriting that cap is exactly the boundary the
+ * column removed. So: fallback, never the rule.
  *
- * So the row id is resolved to an ig_id first — through the rows THIS request
- * read, before the collapse, because the row an analysis cites is usually the
- * one that lost it — and the ig_id is what the board matches on. No migration:
- * the join already exists in memory, and the column that would carry it
- * (`post_analyses.ig_id`) would have to be backfilled from exactly this map.
- *
- * `unresolved` counts analyses whose row was not in the read at all — a
- * truncated scan, or a deleted row. Returned rather than folded into "not
- * analysed", because an analysis this route could not place is not the same
- * fact as a post that has none.
+ * Built from the PRE-collapse rows on purpose, because the row an analysis cites
+ * is usually the one the collapse discarded.
  */
-function indexAnalysesByPost(
-  analyses: readonly AnalysisRow[],
-  igIdByRowId: ReadonlyMap<string, string>,
-  winnerRowIds: ReadonlySet<string>,
-): { byIgId: Map<string, AnalysisLink>; unresolved: number } {
-  const byIgId = new Map<string, AnalysisLink>();
-  let unresolved = 0;
-
-  for (const analysis of analyses) {
-    const igId = igIdByRowId.get(analysis.post_id);
-    if (igId === undefined) {
-      unresolved += 1;
-      continue;
-    }
-    const link: AnalysisLink = { analysis, superseded: !winnerRowIds.has(analysis.post_id) };
-    const held = byIgId.get(igId);
-    if (held === undefined || beats(link, held)) byIgId.set(igId, link);
-  }
-
-  return { byIgId, unresolved };
+function legacyIgIdByRowId(rows: readonly { id: string; ig_id: string }[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const row of rows) map.set(row.id, row.ig_id);
+  return map;
 }
 
 /** GET /api/board?account=&format=&band= — every post with its analysis. */
@@ -260,14 +226,10 @@ export async function GET(request: Request) {
     const population = collapseToPosts(rows, rank);
     const allPosts = byEngagement(population.posts);
 
-    // Built from the PRE-collapse rows: the row an analysis cites is usually the
-    // one the collapse discarded, and that row is the only place its ig_id is.
-    const igIdByRowId = new Map<string, string>();
-    for (const row of rows) igIdByRowId.set(row.id, row.ig_id);
-
+    // Matched on `post_analyses.ig_id` — the column, not an inference from this
+    // request's capped read. The map below is only the pre-0004 fallback.
     const analysisRows = (analysesResult.data as AnalysisRow[] | null) ?? [];
-    const winnerRowIds = new Set(allPosts.map((post) => post.id));
-    const analyses = indexAnalysesByPost(analysisRows, igIdByRowId, winnerRowIds);
+    const analyses = indexAnalysesByPost(analysisRows, allPosts, legacyIgIdByRowId(rows));
 
     const stats = statsOf(allPosts);
 
@@ -294,7 +256,7 @@ export async function GET(request: Request) {
                * not. Undated they read as current, which they are not.
                */
               created_at: link.analysis.created_at,
-              /** See AnalysisLink.superseded — the card says so, in words. */
+              /** See AnalysisLink.superseded in src/lib/board/identity.ts — the card says so, in words. */
               superseded: link.superseded,
             }
           : null,
@@ -309,18 +271,44 @@ export async function GET(request: Request) {
           })
         : decorated;
 
-    // Counted over the whole population, not the filtered view, and by post.
-    let analyzedCurrent = 0;
-    let analyzedSuperseded = 0;
-    for (const post of allPosts) {
-      const link = analyses.byIgId.get(post.ig_id);
-      if (link === undefined) continue;
-      if (link.superseded) analyzedSuperseded += 1;
-      else analyzedCurrent += 1;
-    }
+    /* ------------------------------------------------------- the images --- *
+     *
+     * WHY THE BUCKET IS ASKED AND NOT THE ROW. Nothing in `posts` records
+     * whether a thumbnail was mirrored. It could not: `posts.raw` holds the CDN
+     * URL the scrape returned, that URL expires, and a row is not rewritten when
+     * it does — so a card built from the row would claim an image that resolves
+     * to nothing, which is the broken-image icon hard rule 2 forbids. The
+     * storage listing is the only thing that knows, and it is read here, once
+     * per distinct account (two, at this corpus) rather than once per card.
+     *
+     * IT IS READ OVER THE POSTS BEING RETURNED, not the whole population: these
+     * are the cards that will ask for an image, and the counts below therefore
+     * describe the view the operator is looking at. `banded` is already
+     * account-filtered, so a single-account view lists one prefix.
+     *
+     * RULE 4. `src` is `/api/assets?path=…` — a route path, not a signed URL.
+     * The signed URL is minted inside that route after requireOperator() and
+     * handed to the browser as a 307 that expires in five minutes; nothing in
+     * this response, and nothing in the client bundle, ever holds one.
+     */
+    const mirrorIndex = await readMirrorIndex(
+      db,
+      banded.map((post) => post.account),
+    );
+    const withMedia = banded.map((post) => ({
+      ...post,
+      media: postMediaFor(mirrorIndex, post.account, post.ig_id),
+    }));
+    const images = mirrorCoverage(withMedia.map((post) => post.media));
+
+    // Counted over the whole population, not the filtered view, and by post:
+    // indexAnalysesByPost() is bounded by the population it was handed, so its
+    // counts are already per-post over `allPosts`.
+    const analyzedCurrent = analyses.analyzed_current;
+    const analyzedSuperseded = analyses.analyzed_superseded;
 
     return NextResponse.json({
-      posts: banded,
+      posts: withMedia,
       totals: {
         posts: allPosts.length,
         /** Posts carrying an analysis, resolved through ig_id — see above. */
@@ -338,6 +326,26 @@ export async function GET(request: Request) {
       analyses: {
         rows_read: analysisRows.length,
         unresolved: analyses.unresolved,
+      },
+      /**
+       * The image state of the cards being returned, in the three states the
+       * bucket can actually prove. `mirrored + not_mirrored + unknown` equals
+       * `examined`, so none of the three is a zero standing in for an absence —
+       * a listing that failed raises `unknown`, it does not shrink `mirrored`.
+       *
+       * `enabled` is the MIRROR_MEDIA flag as the server reads it. It is the
+       * boolean, never the value of any secret, and it is what lets a card say
+       * WHY it has no image: "the flag is off" and "the flag is on and this
+       * post's URL had nothing left to copy" are different facts about the post.
+       */
+      media: {
+        enabled: mirrorMediaEnabled(),
+        index_complete: mirrorIndex.complete,
+        index_error: mirrorIndex.error,
+        examined: images.examined,
+        mirrored: images.mirrored,
+        not_mirrored: images.not_mirrored,
+        unknown: images.unknown,
       },
       /**
        * What the population above actually is, in both units, so the screen can
