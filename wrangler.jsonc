@@ -1,9 +1,12 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
 
-  // Derived the way @opennextjs/cloudflare's own `getWorkerName()` derives it:
-  // the package.json name, lowercased, with anything outside [a-z0-9-] stripped.
-  "name": "thinkquality-studio",
+  // Matches the Cloudflare Workers Builds project, which is named after the
+  // connected GitHub repo (kurdim12/thinkqulity-design — the misspelling is
+  // the repo's, and the project inherited it). CI overrides any other value and
+  // warns that it will open a PR to reconcile, so keep this in step by hand.
+  // The public origin is therefore https://thinkqulity-design.<subdomain>.workers.dev
+  "name": "thinkqulity-design",
   "main": ".open-next/worker.js",
 
   // Derived the way the adapter derives it (dist/cli/utils/create-wrangler-config.js
@@ -119,7 +122,14 @@
   // this app means Amman. That would put the Worker one continent away from the
   // data and turn each sequential query into a transcontinental round trip —
   // i.e. "edge" placement makes this specific app SLOWER, not faster.
-  "placement": { "mode": "smart", "hint": "aws:eu-central-1" },
+  //
+  // The hint is a Cloudflare REGION GROUP, not a cloud-provider region. The
+  // deploy API rejects anything else — the first CI deploy on 2026-08-15 failed
+  // with error 10021: `invalid placement hint 'aws:eu-central-1'. Valid options
+  // are: wnam, enam, sam, weur, eeur, apac, oc, afr, me`. Frankfurt is `weur`.
+  // (wrangler's schema types the hint as a bare string, so a wrong value passes
+  // local validation and only fails at the API. Verify against that list.)
+  "placement": { "mode": "smart", "hint": "weur" },
 
   // Workers Logs. Needed to see a 1102 (isolate out of memory) or an exception
   // after the fact; without it a failed request leaves no trace to read.
