@@ -12,6 +12,7 @@ import {
   DatabaseOutlined,
   DashboardOutlined,
   FileTextOutlined,
+  MessageOutlined,
   RocketOutlined,
   SettingOutlined,
   UserOutlined,
@@ -39,6 +40,13 @@ export function Shell({ email, children }: { email: string; children: React.Reac
 
   const items = [
     { key: '/dashboard', icon: <DashboardOutlined />, label: t.nav.dashboard },
+    // Directly under the dashboard: chat is the way into every other screen —
+    // it answers from the same data and dispatches to the same features — so it
+    // sits where a reader looks second, not at the bottom of the list.
+    // Labelled inline rather than from dict.ts, as /digest, /decisions and
+    // /audience already are: the dictionary is shared with other work in flight
+    // and this screen needs exactly one new string.
+    { key: '/chat', icon: <MessageOutlined />, label: tt('الدردشة', 'Chat') },
     { key: '/brand', icon: <BulbOutlined />, label: t.nav.brand },
     { key: '/data', icon: <DatabaseOutlined />, label: t.nav.data },
     { key: '/concepts', icon: <AppstoreOutlined />, label: t.nav.concepts },

@@ -11,6 +11,56 @@ so a green line can be checked rather than trusted.
 
 ---
 
+## THE FRAME — JUST ASK IT
+
+**Before the WOW, not instead of it.** One question, asked out loud, answer read
+off the screen.
+
+Open **`/chat`** and type Ahmad's own question:
+
+```
+ليش حساب الأكاديمية ضعيف؟
+```
+
+*Why is the academy account weak?*
+
+Every chatbot replies. What matters here is **what it is allowed to say**. The
+answer is assembled from the same rows the Dashboard renders, through named,
+code-defined lookups, and it is linted before a word of it is delivered:
+
+- The figures come from `account_averages` — the same computation the Dashboard
+  reads. Against this database that is **190** personal posts averaging
+  **507.93** engagement against **130** academy posts averaging **39.85**, a
+  gap of **12.75×**, measured over the snapshot taken **2026-08-14**.
+- Every one of those values arrives carrying a `source_key`
+  (`performance.academy.avg_engagement` and its siblings). A number with no key
+  does not reach the screen — it is repaired once, and if it survives that, it
+  is stripped and replaced with a visible **«رقم غير موثّق — حُذف»** chip.
+- **Watch for what it will not do.** It will not tell you *why* the account
+  underperforms in terms of what the audience wants, because no comments are
+  stored and no post has been analysed yet. It has the gap; it does not have
+  the cause. An answer that confidently explained the cause would be precisely
+  the thing this product exists not to do.
+
+**Say the line:** *it answered in Arabic, from his own rows, and it stopped
+exactly where the data stopped.*
+
+Why this goes first: it sets the frame that you can simply **talk** to the
+thing. Without it, the compliance refusal a minute later reads as the one trick
+the demo has. With it, the refusal reads as the same discipline showing up
+twice — once when asked a question, once when handed a draft. The WOW stops
+being a party piece and becomes the second data point.
+
+**This beat needs a live model key**, exactly as the Arabic rewrite does. The
+lookups underneath it are arithmetic and cannot flake; the model *choosing* to
+call them is the part that needs a provider. `demo:check` reports
+**Chat answers the engagement question** and says plainly which half it was able
+to execute — it proves the lookup and the tool wiring against the real database
+every run, and refuses to go green on the model leg it cannot observe. If that
+line is red, cut this beat. Do not narrate a reply you did not get.
+
+---
+
 ## THE WOW
 
 Paste Ahmad's own off-brand draft into **Compliance** → instant **FAIL** with
@@ -128,13 +178,17 @@ If the slot is short, this beat is the first thing to go after Audience.
 
 1. **Problem, live** — Dashboard. Personal averages **508** per post, academy
    **40**. His own voice outperforms the brand account roughly **13×**. Read
-   from 320 real rows, not a slide.
-2. **Workflow** — The Board. Open the 33,176-engagement card
+   from 320 real rows, not a slide. Point at the two numbers; do not narrate
+   them, because the next beat reads them back with their sources.
+2. **Frame** — Chat. Ask «ليش حساب الأكاديمية ضعيف؟» out loud and read the
+   sourced answer. Establishes that you can just talk to it, and that it stops
+   where the data stops.
+3. **Workflow** — The Board. Open the 33,176-engagement card
    («الموضوع مش نكد»). Generate a concept and a storyboard from it, in Arabic,
    live. Audience, if the slot allows: who is in the comments and when they
    show up.
-3. **WOW** — Compliance. Fail → Arabic rewrite → pass.
-4. **So-what** — «كل رقم إله مصدر» — every claim traceable to a row.
+4. **WOW** — Compliance. Fail → Arabic rewrite → pass.
+5. **So-what** — «كل رقم إله مصدر» — every claim traceable to a row.
 
 ---
 
@@ -144,23 +198,25 @@ Rehearse this ten times. Exact clicks, exact values.
 
 | # | Screen | Action | Input |
 |---|---|---|---|
-| 1 | `/dashboard` | Point at the two averages | — |
-| 2 | `/board` | Sort is already engagement-desc; open the top card | — |
-| 3 | `/board` | Read the cluster label and explanation aloud | — |
-| 4 | `/audience` | Read two recurring themes and one question aloud | — |
-| 5 | `/audience` | Scroll to **Posting time × engagement**; point at the `n` on every window | — |
-| 6 | `/concepts` | Count `3`, account `academy`, no theme → **Generate** | count: 3 |
-| 7 | `/concepts` | Open the first card → **Storyboard** tab → **Generate** | frames: 5 |
-| 8 | `/concepts` | Show the filming sheet print view | — |
-| 9 | `/compliance` | Paste the off-brand text → **Check** | (text above) |
-| 10 | `/compliance` | Expand two Law rows — show the evidence | — |
-| 11 | `/compliance` | **Apply fixes & re-check** → read the Arabic rewrite aloud → PASS | — |
-| 12 | `/guideline` | Show v1, scroll to Colour, point at the source tags | — |
+| 1 | `/dashboard` | Point at the two averages — do not narrate them | — |
+| 2 | `/chat` | Type the question, send, read the answer aloud | ليش حساب الأكاديمية ضعيف؟ |
+| 3 | `/chat` | Point at where it stops — no cause, because no comments are stored | — |
+| 4 | `/board` | Sort is already engagement-desc; open the top card | — |
+| 5 | `/board` | Read the cluster label and explanation aloud | — |
+| 6 | `/audience` | Read two recurring themes and one question aloud | — |
+| 7 | `/audience` | Scroll to **Posting time × engagement**; point at the `n` on every window | — |
+| 8 | `/concepts` | Count `3`, account `academy`, no theme → **Generate** | count: 3 |
+| 9 | `/concepts` | Open the first card → **Storyboard** tab → **Generate** | frames: 5 |
+| 10 | `/concepts` | Show the filming sheet print view | — |
+| 11 | `/compliance` | Paste the off-brand text → **Check** | (text above) |
+| 12 | `/compliance` | Expand two Law rows — show the evidence | — |
+| 13 | `/compliance` | **Apply fixes & re-check** → read the Arabic rewrite aloud → PASS | — |
+| 14 | `/guideline` | Show v1, scroll to Colour, point at the source tags | — |
 
-Land on step 12 and stop.
+Land on step 14 and stop.
 
-Steps 4–5 are the only optional ones, and the first to cut. If you keep them,
-the point of step 5 is not the heatmap — it is that no window is shown without
+Steps 6–7 are the only optional ones, and the first to cut. If you keep them,
+the point of step 7 is not the heatmap — it is that no window is shown without
 its `n`, because the model is forbidden from writing a timing number at all.
 Those figures are arithmetic over `posted_at × engagement` in Amman time. The
 model is allowed to name the shape of the pattern in Arabic and nothing else;
@@ -185,7 +241,20 @@ a digit in that field is rejected before it is stored.
 - [ ] `APIFY_BUDGET_USD` set to a real ceiling. Blank is not a ceiling, it is
       no ceiling: every scrape that can be costed is waved through
 - [ ] A provider key `demo:check` reports green — without one, the Arabic
-      rewrite leg cannot run and the WOW is half a demo
+      rewrite leg cannot run and the WOW is half a demo, and the chat frame
+      beat cannot run at all
+- [ ] The chat frame beat rehearsed once against the live model. `demo:check`
+      proves the `account_averages` lookup and the `get_stats` tool wiring
+      every run, but it cannot prove the model *chooses* that tool — that is
+      the one part only a real ask confirms. Ask it once, in Arabic, before
+      they walk in
+- [ ] **Only if you intend to generate anything FROM chat:** apply
+      `supabase/migrations/0007_chat_dispatch_reservation.sql`. Until it is
+      applied, `mcp_reservations.tool` refuses the name chat reserves under and
+      every dispatched concept, campaign, report, guideline, rewrite or digest
+      is refused — safely, and completely. `demo:check` reports this as **Chat
+      dispatch reservation permitted** and probes the live constraint without
+      writing a row. The frame beat above does not dispatch and is unaffected
 - [ ] No decision past its review date without a verdict. `demo:check` reports
       this against Amman's date, the same date `/decisions` computes it from.
       An overdue unanswered row is the worst thing to walk into live
@@ -222,6 +291,8 @@ earns itself; it is not owed a slot.
 |---|---|---|
 | No network | Switch to the recording | "I have a recording — same run, made this morning." |
 | Model slow (>8s) | Show the cached concept batch | "That one's cached from earlier — the live call is still going, we'll come back to it." |
+| The chat answer is slow or errors | Skip to the Board; do not retry live | "That one's a live model call — we'll come back. The numbers it reads are on the Dashboard either way." |
+| Chat strips a number and shows the «رقم غير موثّق — حُذف» chip | Stop and point at it | "That's the system catching its own model mid-sentence — the number had no source, so it never reached me." |
 | The Arabic rewrite stalls or errors | Stay on the FAIL screen, read the Law evidence | "The refusal is the deterministic half and it already ran — no model involved. The rewrite is the model, and it's still thinking." |
 | Bad or weird output | Keep it on screen; open Compliance on it | "Good — let's run that through the checker. This is exactly what it's for." |
 | Compliance unexpectedly passes | Show the Law rows anyway | "The checks ran and cleared it — here's the evidence it used." |
@@ -234,19 +305,26 @@ failure of the product, it is the product's use case.
 
 ## TIMING
 
-**Four minutes for a five-minute slot.** Never fill the slot.
+**Four minutes ten for a five-minute slot.** Never fill the slot.
 
-- Problem: 40s
+- Problem: 15s
+- Frame — just ask it: 35s
 - Board + generate: 90s
 - WOW: 90s
 - Landing: 20s
 
-Audience (steps 4–5) is not in that budget. It is the one optional stretch in
+The Problem segment is shorter than it used to be, and deliberately: the chat
+answer reads the same two averages back with their sources, so narrating them
+twice spends 25 seconds to say one thing. Point at the Dashboard, then let the
+chat beat do the talking.
+
+Audience (steps 6–7) is not in that budget. It is the one optional stretch in
 the script — add it only when the slot is genuinely six minutes or more.
 
 **The 60-second compressed path**, when the slot collapses: Dashboard averages
 (15s) → Compliance fail → fix → pass (35s) → the so-what line (10s). Skip the
-Board, skip Audience, skip generation, skip the guideline.
+Board, skip chat, skip Audience, skip generation, skip the guideline. The frame
+beat is worth 35 seconds of four minutes; it is not worth a third of sixty.
 
 ---
 

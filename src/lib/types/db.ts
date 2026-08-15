@@ -657,3 +657,104 @@ export interface PostAnalysisRow {
   ig_id: string | null;
   created_at: string;
 }
+
+/* ===========================================================================
+ * 0006_chat — the chat transcript.
+ *
+ * The chat surface is a WINDOW and a DISPATCHER (hard rule 17): it answers from
+ * the strategist's blocks and from named lookups, and it hands every deliverable
+ * to the feature that already owns it. So no row below holds a deliverable. A
+ * card is a REFERENCE to what a dispatch produced; the artefact itself lives in
+ * `concepts`, `campaigns`, `reports`, `brand_guidelines` or `digests`, behind
+ * that feature's own Law → Judge gate.
+ *
+ * The other half of the contract is hard rule 16: an assistant turn is buffered
+ * server-side, linted against the blocks it was given AND the tool results it
+ * received, and only then delivered. `law_report` is that lint, stored with the
+ * turn, so a reply that had a number stripped can say so afterwards from the row
+ * alone. A turn with no report is a turn nothing gated — worth being able to
+ * find.
+ * ========================================================================= */
+
+export type ChatRole = 'user' | 'assistant' | 'tool';
+
+export interface ConversationRow {
+  id: string;
+  /** Null until the thread has enough in it to be named. Never a placeholder. */
+  title: string | null;
+  created_at: string;
+}
+
+/**
+ * One tool call the model asked for, recorded as the transport reported it.
+ *
+ * `arguments` stays a STRING — the raw JSON the model emitted, not a parsed
+ * object. Two reasons, and the second is the one that matters: a re-serialised
+ * object is not what the model said, and an argument string that failed to parse
+ * is exactly the thing an audit trail must keep rather than discard.
+ */
+export interface ChatToolCallRecord {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+/**
+ * One Law check as it is stored. Structurally identical to `LawResult` in
+ * src/lib/brain/law/types.ts and deliberately NOT imported from it — this file
+ * is a leaf with no dependencies, the same reason `PostAnalysisRow.computed` is
+ * typed structurally.
+ */
+export interface ChatLawResultRow {
+  check: string;
+  passed: boolean;
+  evidence: string;
+  severity: 'violation' | 'warning';
+}
+
+/**
+ * What the gate did to this reply.
+ *
+ * `stripped` is non-empty ONLY in the last-resort case: a draft that was linted,
+ * repaired once, and still stated a number nothing sourced. Those numbers were
+ * removed from the delivered text and replaced with a visible marker. An empty
+ * array means nothing was removed — which is the ordinary case, and is not the
+ * same as `passed: false`.
+ */
+export interface ChatLawReportRow {
+  /** Whether the DELIVERED text passes the linter. False should be unreachable. */
+  passed: boolean;
+  /** True when the first draft violated and a second was asked for. */
+  repaired: boolean;
+  /** Numbers removed from the delivered text, verbatim as the draft wrote them. */
+  stripped: string[];
+  /** Every check that ran, in order, including the ones that passed. */
+  results: ChatLawResultRow[];
+}
+
+/**
+ * One turn.
+ *
+ * `content` is NOT NULL and defaults to '': an assistant turn that dispatched a
+ * card and said nothing is an empty string, not an unknown one. Nullable text
+ * would make "said nothing" and "was never recorded" indistinguishable.
+ *
+ * `est_usd` is null when no published per-token rate has been verified for the
+ * model that answered (hard rule 15). Null means unpriced and says so; it never
+ * means free, and it is never rendered as 0.
+ */
+export interface ChatMessageRow {
+  id: string;
+  conversation_id: string;
+  role: ChatRole;
+  content: string;
+  /** References to dispatched deliverables. Never the deliverable itself. */
+  cards: Record<string, unknown>[] | null;
+  /** Present on an assistant turn that called tools; null on one that did not. */
+  tool_calls: ChatToolCallRecord[] | null;
+  /** Present on every delivered assistant turn. Null on user and tool rows. */
+  law_report: ChatLawReportRow | null;
+  /** Null = unpriced, never free. See the note above. */
+  est_usd: number | null;
+  created_at: string;
+}

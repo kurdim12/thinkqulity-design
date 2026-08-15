@@ -42,6 +42,13 @@ export type EnvKey =
   // Optional. Hard rule 14 — external callers cannot spend freely. The ceiling
   // on model-backed generations an MCP caller can trigger per Asia/Amman day.
   | 'MCP_DAILY_GENERATION_CAP'
+  // Optional. Hard rule 18 — the chat surface opens no new spend path. The
+  // ceiling on model-backed generations a CHAT DISPATCH can trigger per
+  // Asia/Amman day. It is a second ceiling over the SAME day ledger the MCP cap
+  // spends against (mcp_cap_days.reserved_units, taken through the atomic
+  // reservation in supabase/migrations/0005_mcp_reservations.sql), not a second
+  // budget: whichever ceiling is tighter refuses its own caller first.
+  | 'CHAT_DAILY_GENERATION_CAP'
   // Optional overrides — the two model tiers behind the header quality switch.
   | 'AI_MODEL_STANDARD'
   | 'AI_MODEL_QUALITY'
@@ -379,6 +386,13 @@ const ENV_SPECS: Record<EnvKey, EnvSpec> = {
     placement: 'var',
     what: 'model-backed generations an MCP caller may trigger per Asia/Amman day; unset uses the conservative built-in default',
   },
+
+  /* -- optional: the chat surface ---------------------------------------- */
+  CHAT_DAILY_GENERATION_CAP: {
+    requirement: 'optional',
+    placement: 'var',
+    what: 'model-backed generations a chat dispatch may trigger per Asia/Amman day, over the same day ledger the MCP cap spends against; unset uses the built-in default',
+  },
 };
 
 /**
@@ -412,6 +426,7 @@ const ECHOABLE_VALUES: ReadonlySet<EnvKey> = new Set<EnvKey>([
   // The cap is a policy number an operator needs to read back. The token it
   // sits beside is deliberately NOT here.
   'MCP_DAILY_GENERATION_CAP',
+  'CHAT_DAILY_GENERATION_CAP',
 ]);
 
 /** False for every credential. Never show a value this returns false for. */
@@ -474,13 +489,18 @@ function usabilityProblem(key: EnvKey): string | null {
       : null;
   }
 
-  if (key === 'MCP_DAILY_GENERATION_CAP') {
+  if (key === 'MCP_DAILY_GENERATION_CAP' || key === 'CHAT_DAILY_GENERATION_CAP') {
     // Set-but-unparseable is the trap here, and it is a quiet one:
     // `positiveIntEnv` falls back to its default, so a cap typed as "20 " with
     // a stray character, as "20.5", or as "-1" silently becomes the built-in
     // number and the operator believes a ceiling is in force that is not the
     // one they wrote. Absence is fine and is reported separately; this branch
     // only judges a present value.
+    //
+    // BOTH CAPS ARE JUDGED BY THE SAME BRANCH ON PURPOSE. They are read by the
+    // same `positiveIntEnv`, they fail the same silent way, and they bound the
+    // same shared day ledger — a second branch that drifted from this one would
+    // report two different truths about one mechanism.
     const raw = optionalEnv(key);
     if (raw === null) return null;
     const parsed = Number(raw);

@@ -6,8 +6,9 @@
  */
 import { createClient } from '@supabase/supabase-js';
 import { registerHooks } from 'node:module';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
@@ -914,6 +915,424 @@ if (mcp) {
       'MCP cap armed',
       `the cap could not be counted, so every model-backed MCP call fails closed — ${err.message}. ` +
         'Confirm the concepts and compliance_checks tables are readable with the service-role key',
+    );
+  }
+}
+
+/* ====================================================== the chat surface ====
+ *
+ * Four checks, and the ordering is the demo's own: can you REACH the screen,
+ * does it ANSWER with sourced figures, is the gate that makes those answers
+ * safe actually PROVEN, and can a dispatch spend anything.
+ *
+ * THE RULE THESE ALL OBEY: where a leg cannot be executed on this machine, it
+ * is reported as not executed. It is never inferred from a leg that did run.
+ * The model-dependent half of the second check is the whole reason that rule is
+ * written down — with no provider key, "the model picks get_stats" cannot be
+ * observed here, and a green tick claiming otherwise would be exactly the kind
+ * of unsourced assertion the surface itself refuses to make.
+ * ========================================================================= */
+
+/* -- 1. the way in, in both languages ------------------------------------- */
+
+/**
+ * The nav entry is rendered by `tt(arabic, english)`, so ONE of the two strings
+ * going missing is invisible in whichever locale still has one. Both halves are
+ * read out of the source and checked for the script they are supposed to be in
+ * — a check that only asserted "two arguments" would pass on tt('Chat','Chat').
+ */
+// Resolved from THIS file rather than from cwd: `npm run demo:check` happens to
+// run at the project root, but a check that silently reports "the menu is
+// missing" because someone invoked it from another directory would be worse
+// than no check at all.
+const REPO_ROOT = new URL('../', import.meta.url);
+const repoPath = (rel) => fileURLToPath(new URL(rel, REPO_ROOT));
+
+// Absolute for reading, repo-relative for the message: a fix line is something
+// a person retypes, so it names the file the way the repository does.
+const SHELL_REL = 'src/components/Shell.tsx';
+const CHAT_PAGE_REL = 'src/app/(app)/chat/page.tsx';
+const SHELL_PATH = repoPath(SHELL_REL);
+const CHAT_PAGE_PATH = repoPath(CHAT_PAGE_REL);
+
+try {
+  const shell = readFileSync(SHELL_PATH, 'utf8');
+  const entry = /key:\s*'\/chat'[^}]*?label:\s*tt\(\s*'([^']*)'\s*,\s*'([^']*)'\s*\)/.exec(shell);
+
+  if (!existsSync(CHAT_PAGE_PATH)) {
+    bad(
+      'Chat nav entry, both languages',
+      `${SHELL_REL} is not the problem — ${CHAT_PAGE_REL} does not exist, so the menu item would ` +
+        'route to a 404. Restore the page before linking to it',
+    );
+  } else if (entry === null) {
+    bad(
+      'Chat nav entry, both languages',
+      `no \`key: '/chat'\` item with a \`label: tt('<arabic>', '<english>')\` was found in ${SHELL_REL}. ` +
+        'The screen exists but nothing navigates to it, so a demo can only reach /chat by typing the ' +
+        'URL. Add the item to the `items` array next to the dashboard entry',
+    );
+  } else {
+    const [, arabic, english] = entry;
+    // U+0600–U+06FF is the Arabic block; A-Za-z is the Latin one. A label in the
+    // wrong script is a placeholder somebody meant to come back to.
+    const arabicOk = /[؀-ۿ]/.test(arabic);
+    const englishOk = /[A-Za-z]/.test(english) && !/[؀-ۿ]/.test(english);
+    if (!arabicOk || !englishOk) {
+      bad(
+        'Chat nav entry, both languages',
+        `the /chat item reads tt('${arabic}', '${english}') in ${SHELL_REL}, and ` +
+          `${!arabicOk ? 'the Arabic label carries no Arabic script' : 'the English label is not Latin script'}` +
+          ' — one locale would show a placeholder. Give it a real label in both',
+      );
+    } else {
+      ok('Chat nav entry, both languages', `/chat → AR "${arabic}" · EN "${english}"`);
+    }
+  }
+} catch (err) {
+  bad(
+    'Chat nav entry, both languages',
+    `${SHELL_REL} could not be read, so the menu was not checked at all — ${err.message}`,
+  );
+}
+
+/* -- 2. the question, answered from named lookups ------------------------- */
+
+/**
+ * «قدّيش معدل تفاعل كل حساب؟» — "what is each account's average engagement?"
+ *
+ * THREE LEGS, AND THE THIRD IS THE ONE THAT NEEDS A KEY:
+ *   a. the named lookup `account_averages` runs against the REAL database and
+ *      returns values that each carry a source_key (rule 12);
+ *   b. the chat TOOL EXECUTOR resolves `get_stats` to that lookup and hands the
+ *      source_keys back — this is the wiring the route depends on, and it needs
+ *      no model at all;
+ *   c. the model, shown this question, chooses `get_stats`. That one calls a
+ *      provider and cannot be observed without a key.
+ *
+ * a and b are executed here every time. c is executed only when a key exists,
+ * and when it does not, this check FAILS and says which leg was not run. It is
+ * a FAIL rather than a NOTE because an operator can make it green by setting the
+ * key that the first check on this list is already red about.
+ */
+const CHAT_QUESTION = 'قدّيش معدل تفاعل كل حساب؟';
+const CHAT_LOOKUP = 'account_averages';
+
+let statsModule = null;
+let chatToolsModule = null;
+try {
+  statsModule = await import('../src/lib/agent/chat/stats.ts');
+  chatToolsModule = await import('../src/lib/agent/chat/tools.ts');
+} catch (err) {
+  bad(
+    'Chat answers the engagement question',
+    `the chat modules could not be loaded, so nothing was proven — ${err.message}. This script relies ` +
+      'on Node type-stripping; run it on the Node version in package.json',
+  );
+}
+
+if (statsModule && chatToolsModule) {
+  try {
+    /* -- leg a: the lookup itself ---------------------------------------- */
+    const outcome = await statsModule.runStatLookup(db, CHAT_LOOKUP, { account: 'all' });
+
+    if (outcome.ok !== true) {
+      bad(
+        'Chat answers the engagement question',
+        `the named lookup "${CHAT_LOOKUP}" refused (${outcome.refusal}) instead of running, so the ` +
+          `question cannot be answered from sources at all. ${outcome.reason ?? ''}`.trim(),
+      );
+    } else {
+      const result = outcome.result;
+      const unsourced = result.values.filter((v) => !v.source_key || v.source_key.trim() === '');
+
+      /* -- leg b: the executor the route actually calls -------------------- */
+      const published = chatToolsModule.chatToolSpecs().map((spec) => spec.name);
+      const execute = chatToolsModule.createChatToolExecutor({
+        db,
+        quality: 'standard',
+        now: new Date(),
+      });
+      const toolResult = await execute({
+        id: 'demo-check',
+        name: 'get_stats',
+        arguments: JSON.stringify({ lookup: CHAT_LOOKUP, params: { account: 'all' } }),
+      });
+      const toolKeys = toolResult.source_keys ?? [];
+
+      if (!published.includes('get_stats')) {
+        bad(
+          'Chat answers the engagement question',
+          `the lookup works, but \`get_stats\` is not among the tools the surface publishes ` +
+            `(${published.join(', ')}), so the model is never offered it and the question falls back to ` +
+            'prose. Publish the full CHAT_TOOL_NAMES allow-list from src/lib/agent/chat/tools.ts',
+        );
+      } else if (result.status === 'absent' || result.values.length === 0) {
+        bad(
+          'Chat answers the engagement question',
+          `the lookup ran but measured nothing (status "${result.status}"), so the honest answer today ` +
+            'is an em-dash. Ingest a snapshot before demoing this question',
+        );
+      } else if (unsourced.length > 0) {
+        bad(
+          'Chat answers the engagement question',
+          `${unsourced.length} of ${result.values.length} value(s) carry no source_key ` +
+            `(${unsourced.map((v) => v.label).join(', ')}). Rule 12 — every rendered quantity names what ` +
+            'produced it — so a reply quoting these could not be linted. Fix the lookup in ' +
+            'src/lib/agent/chat/stats.ts',
+        );
+      } else if (toolKeys.length === 0) {
+        bad(
+          'Chat answers the engagement question',
+          'the lookup returns sourced values, but the get_stats TOOL handed back none of their ' +
+            'source_keys, so the linter would treat every figure in the reply as unsourced and strip ' +
+            'it. Fix the executor in src/lib/agent/chat/tools.ts',
+        );
+      } else {
+        const summary =
+          `${result.values.length} sourced value(s) over snapshot ${result.measured_over?.taken_on ?? '—'}, ` +
+          `tool returned ${toolKeys.length} source_key(s) incl. ${toolKeys[0]}`;
+
+        // Leg c. Not executed without a key, and not claimed.
+        if (!provider) {
+          bad(
+            'Chat answers the engagement question',
+            `EXECUTED: the named lookup "${CHAT_LOOKUP}" and the get_stats tool, both against the real ` +
+              `database — ${summary}. NOT EXECUTED: the model leg, i.e. that «${CHAT_QUESTION}» actually ` +
+              'makes the model choose get_stats, which needs a provider key. This check cannot go green ' +
+              'until the "Model provider key" check above does — set the key, then re-run and ask the ' +
+              'question once on /chat before the demo',
+          );
+        } else {
+          ok('Chat answers the engagement question', `${summary} — model leg not re-run here; ask «${CHAT_QUESTION}» once on /chat to confirm`);
+        }
+      }
+    }
+  } catch (err) {
+    bad(
+      'Chat answers the engagement question',
+      `the lookup threw instead of answering — ${err.message}. A question the operator will ask on ` +
+        'stage cannot end in an exception; fix it in src/lib/agent/chat/stats.ts',
+    );
+  }
+}
+
+/* -- 3. the gate that makes those answers safe ---------------------------- */
+
+/**
+ * Hard rule 16 in one line: an unsourced number never reaches the screen. The
+ * suite proves it with a TRAP — a fixture whose invented number appears in no
+ * block — and that trap is only meaningful if the number really is absent, which
+ * is itself a test.
+ *
+ * RUN, NOT READ. The file is executed and its TAP output parsed, because "the
+ * test exists" and "the test passes" are different facts and only the second one
+ * is worth a green tick. The named trap probe must be PRESENT and passing: a
+ * suite that quietly lost it would otherwise report a clean run.
+ */
+const TRAP_TEST_FILE = 'tests/chat-lint.test.ts';
+const TRAP_TEST_NAME = 'the fixture is a real trap: the invented number appears nowhere in the blocks';
+
+try {
+  const run = spawnSync(
+    process.execPath,
+    ['--test', '--experimental-strip-types', repoPath(TRAP_TEST_FILE)],
+    { encoding: 'utf8', timeout: 120_000, cwd: fileURLToPath(REPO_ROOT) },
+  );
+  const out = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+
+  // The TAP line for THIS test, matched exactly. `ok 12 - <name>` and
+  // `not ok 12 - <name>` are the two shapes; anything else means the test did
+  // not report at all, which is its own failure and not a pass.
+  const escaped = TRAP_TEST_NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const trapPassed = new RegExp(`^ok \\d+ - ${escaped}$`, 'm').test(out);
+  const trapFailed = new RegExp(`^not ok \\d+ - ${escaped}$`, 'm').test(out);
+  const trapNamed = trapPassed || trapFailed;
+  const failed = Number(/^# fail (\d+)$/m.exec(out)?.[1] ?? 'NaN');
+  const passed = Number(/^# pass (\d+)$/m.exec(out)?.[1] ?? 'NaN');
+
+  if (!trapNamed) {
+    bad(
+      'Chat number-trap probe',
+      `${TRAP_TEST_FILE} ran but never reported a test called "${TRAP_TEST_NAME}". The trap is what ` +
+        'proves the linter is being asked a real question rather than a vacuous one — restore it before ' +
+        'trusting any other result in that file',
+    );
+  } else if (!Number.isFinite(failed) || !Number.isFinite(passed)) {
+    bad(
+      'Chat number-trap probe',
+      `${TRAP_TEST_FILE} produced no readable TAP summary, so nothing was proven — exit ${run.status}. ` +
+        `Run: node --test --experimental-strip-types ${TRAP_TEST_FILE}`,
+    );
+  } else if (failed > 0 || run.status !== 0) {
+    bad(
+      'Chat number-trap probe',
+      `${failed} test(s) in ${TRAP_TEST_FILE} FAILED (exit ${run.status}). The claims-linter is the only ` +
+        'thing standing between the model and an invented number on screen. Do not demo the chat ' +
+        `surface until this is green: node --test --experimental-strip-types ${TRAP_TEST_FILE}`,
+    );
+  } else if (!trapPassed) {
+    bad(
+      'Chat number-trap probe',
+      `the trap probe "${TRAP_TEST_NAME}" did not report as passing in ${TRAP_TEST_FILE}. Every other ` +
+        'assertion in that file rests on it',
+    );
+  } else {
+    ok(
+      'Chat number-trap probe',
+      `${passed} linter test(s) pass, including the trap probe — an invented number is repaired once, ` +
+        'then stripped and chipped',
+    );
+  }
+} catch (err) {
+  bad(
+    'Chat number-trap probe',
+    `${TRAP_TEST_FILE} could not be executed, so the gate is unproven — ${err.message}`,
+  );
+}
+
+/* -- 4. the chat cap, and the door it reserves through --------------------- */
+
+/**
+ * Hard rule 18: the chat surface opens no new spend path. Two things have to be
+ * true and they fail in completely different ways.
+ *
+ *   THE CEILING — CHAT_DAILY_GENERATION_CAP, over the same Amman-day ledger the
+ *   MCP cap spends against. Read from the real environment and the real tables.
+ *
+ *   THE DOOR — every dispatch reserves under `CHAT_RESERVING_TOOL` against the
+ *   atom 0005 created, and `mcp_reservations.tool` carries a CHECK constraint.
+ *   0005 said in terms that a future spending tool needs its own migration, and
+ *   until that migration is APPLIED the insert raises, the function rolls back
+ *   and every dispatch is refused. A cap with a sealed door is not "armed" — it
+ *   is a surface that cannot produce a deliverable at all, which is hard rule 17
+ *   dead on arrival.
+ *
+ * The door is probed with an insert that CANNOT WRITE: `amman_day` is a date no
+ * mcp_cap_days row exists for, so the foreign key rejects the tuple no matter
+ * what. Which error comes back is the answer — 23514 means the CHECK refused the
+ * NAME, 23503 means the name was accepted and only the FK stopped it. A control
+ * probe with a name 0005 already allows must return 23503, otherwise the probe
+ * is not reaching the constraint and its verdict on the chat name means nothing.
+ */
+const IMPOSSIBLE_DAY = '1900-01-01';
+const CHECK_VIOLATION = '23514';
+const FK_VIOLATION = '23503';
+
+let chatDispatchModule = null;
+try {
+  chatDispatchModule = await import('../src/lib/agent/chat/dispatch.ts');
+} catch (err) {
+  bad(
+    'CHAT_DAILY_GENERATION_CAP armed',
+    `src/lib/agent/chat/dispatch.ts could not be loaded, so the cap was not read — ${err.message}`,
+  );
+}
+
+if (chatDispatchModule) {
+  const reservingTool = chatDispatchModule.CHAT_RESERVING_TOOL;
+
+  /* -- the ceiling ------------------------------------------------------- */
+  let capState = null;
+  try {
+    capState = await chatDispatchModule.readChatCapState();
+  } catch (err) {
+    bad(
+      'CHAT_DAILY_GENERATION_CAP armed',
+      `the chat cap could not be counted, so every dispatch fails closed — ${err.message}. Confirm the ` +
+        'concepts and compliance_checks tables are readable with the service-role key',
+    );
+  }
+
+  if (capState) {
+    const raw = process.env.CHAT_DAILY_GENERATION_CAP?.trim() ?? '';
+    const source =
+      raw === ''
+        ? `default ${chatDispatchModule.DEFAULT_CHAT_DAILY_GENERATION_CAP} (${capState.env_key} unset)`
+        : `${capState.env_key}=${raw}`;
+
+    if (!Number.isFinite(capState.limit) || capState.limit <= 0) {
+      bad(
+        'CHAT_DAILY_GENERATION_CAP armed',
+        `the chat cap resolved to ${capState.limit}, which bounds nothing — set ${capState.env_key} to a ` +
+          `positive integer, or unset it to take the default of ` +
+          `${chatDispatchModule.DEFAULT_CHAT_DAILY_GENERATION_CAP}`,
+      );
+    } else if (raw !== '' && String(capState.limit) !== raw) {
+      // positiveIntEnv falls back silently, so "20.5" or "20 " becomes the
+      // default while the operator believes their number is in force.
+      bad(
+        'CHAT_DAILY_GENERATION_CAP armed',
+        `${capState.env_key} is "${raw}" but the cap in force is ${capState.limit} — the value did not ` +
+          'parse as a positive integer and the built-in default took over silently. Write a bare ' +
+          'positive integer in .env.local',
+      );
+    } else if (capState.remaining <= 0) {
+      bad(
+        'CHAT_DAILY_GENERATION_CAP armed',
+        `the cap is armed at ${capState.limit} ${capState.unit} (${source}) and ${capState.used} are ` +
+          `already used, so the next dispatch is refused until ${capState.resets_at} ` +
+          `(${capState.resets_on}, ${capState.time_zone}). Either demo before generating anything else, ` +
+          `or raise ${capState.env_key}`,
+      );
+    } else {
+      ok(
+        'CHAT_DAILY_GENERATION_CAP armed',
+        `${capState.used}/${capState.limit} used, ${capState.remaining} left in the ${capState.time_zone} ` +
+          `day (${source}), resets ${capState.resets_at}`,
+      );
+    }
+  }
+
+  /* -- the door ---------------------------------------------------------- */
+  try {
+    const probe = async (tool) => {
+      const { error } = await db
+        .from('mcp_reservations')
+        .insert({ amman_day: IMPOSSIBLE_DAY, tool, units: 1 });
+      return error;
+    };
+
+    // The control FIRST: a name 0005 already permits must reach the FK.
+    const controlError = await probe('generate_concepts');
+    const chatError = await probe(reservingTool);
+
+    if (controlError?.code !== FK_VIOLATION) {
+      bad(
+        'Chat dispatch reservation permitted',
+        `the probe is not measuring what it claims: inserting an ALREADY-PERMITTED tool name returned ` +
+          `${controlError?.code ?? 'no error'} where the foreign key should have given ${FK_VIOLATION}. ` +
+          'Nothing was written either way, but the verdict on the chat tool name cannot be trusted — ' +
+          'check mcp_reservations against supabase/migrations/0005_mcp_reservations.sql by hand',
+      );
+    } else if (chatError?.code === CHECK_VIOLATION) {
+      bad(
+        'Chat dispatch reservation permitted',
+        `mcp_reservations.tool still REFUSES '${reservingTool}', so every chat dispatch fails closed and ` +
+          'the surface cannot produce a concept, campaign, report, guideline, rewrite or digest at all ' +
+          '(hard rule 17). Nothing is wrong with the code — the migration is not applied. Apply ' +
+          'supabase/migrations/0007_chat_dispatch_reservation.sql, which widens the CHECK to include ' +
+          `'${reservingTool}'`,
+      );
+    } else if (chatError?.code !== FK_VIOLATION) {
+      bad(
+        'Chat dispatch reservation permitted',
+        `probing '${reservingTool}' returned ${chatError?.code ?? 'no error'} — expected ${FK_VIOLATION} ` +
+          `(name allowed, foreign key stopped the write) or ${CHECK_VIOLATION} (name refused). ` +
+          `${chatError?.message ?? 'The insert may have SUCCEEDED, which would leave a bogus reservation row.'}`,
+      );
+    } else {
+      ok(
+        'Chat dispatch reservation permitted',
+        `mcp_reservations.tool accepts '${reservingTool}' (probe stopped by the foreign key, ` +
+          `${FK_VIOLATION}; no row written)`,
+      );
+    }
+  } catch (err) {
+    bad(
+      'Chat dispatch reservation permitted',
+      `the reservation constraint could not be probed, so it is unknown whether a dispatch can reserve ` +
+        `— ${err.message}`,
     );
   }
 }

@@ -1,0 +1,52 @@
+-- ThinkQuality Studio -- v4.1: let the chat surface reserve cap units.
+-- Additive only: 0001_init.sql, 0002_v3_ingestion.sql, 0003_strategist.sql,
+-- 0004_v4_visual.sql, 0005_mcp_reservations.sql and 0006_chat.sql are applied
+-- and are never rewritten (hard rule 6). This is a separate file for exactly
+-- that reason: 0006 had already been applied when this gap was found, so the
+-- widening could not be appended to it.
+--
+-- ---------------------------------------------------------------------------
+-- THE BLOCKING PREREQUISITE 0005 NAMED, AND src/lib/agent/chat/dispatch.ts
+-- RESTATED IN ITS HEADER SO IT COULD NOT BE MISSED. It was missed anyway.
+--
+-- 0005 wrote `mcp_reservations.tool` as
+--     check (tool in ('check_compliance','generate_concepts'))
+-- and said in terms: "A future spending tool needs its own migration -- until
+-- then this constraint refuses the reservation, which fails CLOSED."
+--
+-- `CHAT_RESERVING_TOOL` in src/lib/agent/chat/dispatch.ts is exactly that
+-- future tool. It reserves under the name 'chat_dispatch' against the SAME
+-- atom on purpose, so an operator reading mcp_reservations can see WHERE the
+-- day went rather than only that it is gone -- reusing 'generate_concepts' for
+-- a dispatched campaign would put a false row in that ledger, which is the
+-- same sin as a false number on a screen.
+--
+-- WHAT WAS BROKEN WITHOUT THIS. Every chat dispatch raised inside
+-- mcp_reserve_units, the whole function rolled back (so no units leaked, and
+-- the failure was safe), the RPC returned an error, and dispatch.ts turned it
+-- into a structured refusal with no model call. Safe -- and completely
+-- non-functional: hard rule 17 says deliverables are DISPATCHED and never
+-- written in chat, so with the reservation refused the surface could not
+-- produce a concept, campaign, report, guideline, rewrite or digest at all.
+-- Refusing every dispatch was the right safety behaviour and the wrong product
+-- behaviour, and 0005 was explicit that the resolution is a migration rather
+-- than a workaround in code.
+--
+-- WIDENING, NOT REWRITING. The replacement permits a strict SUPERSET: the two
+-- MCP tools keep exactly the meaning they had and one name is added. Nothing
+-- legal becomes illegal, and the door stays CLOSED to every name not listed --
+-- which is the property 0005 was protecting, not the specific pair. A tool
+-- that calls no model and takes no units still has no business here, and still
+-- cannot be written.
+--
+-- The constraint 0005 wrote is INLINE and therefore unnamed, so Postgres
+-- generated the conventional `<table>_<column>_check`. `if exists` makes this
+-- file safe to re-run and safe on a database where the constraint was already
+-- replaced by hand; the new one is named explicitly so the next migration that
+-- needs to widen it does not have to guess.
+-- ---------------------------------------------------------------------------
+
+alter table mcp_reservations drop constraint if exists mcp_reservations_tool_check;
+
+alter table mcp_reservations add constraint mcp_reservations_tool_check
+  check (tool in ('check_compliance','generate_concepts','chat_dispatch'));
