@@ -268,7 +268,18 @@ interface FencedSignal {
   kill_condition: string | null;
 }
 
-export function splitFencedSignal(stored: string): FencedSignal {
+/**
+ * NOT exported. Next.js validates the export surface of a page module against a
+ * fixed allow-list (default, metadata, dynamic, revalidate …) and rejects
+ * anything else — the 2026-08-15 CI build failed with
+ * `"splitFencedSignal" is not a valid Page export field`.
+ *
+ * `tsc --noEmit` cannot catch this: the rule lives in the types Next generates
+ * into `.next/`, which do not exist until `next build` runs. Only a real build
+ * sees it. If a helper in a page or route file needs to be shared or tested,
+ * move it to `src/lib/` — do not export it from here.
+ */
+function splitFencedSignal(stored: string): FencedSignal {
   const signal: string[] = [];
   const cap: string[] = [];
   const kill: string[] = [];
