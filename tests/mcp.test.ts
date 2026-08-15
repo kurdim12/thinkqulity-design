@@ -27,6 +27,28 @@ import type { BrandRow, DigestRow } from '../src/lib/types/db.ts';
  * spending door.
  *
  * ---------------------------------------------------------------------------
+ * AND THE RESERVATION, which is the cap's actual bound.
+ *
+ * Counting artefacts cannot bound spend, because the spend happens first. The
+ * tools therefore RESERVE units atomically before the first call that can bill
+ * and reconcile afterwards. What is asserted here:
+ *   - the reservation is taken BEFORE the paid step, proven by the ORDER of the
+ *     real operations the tools perform, not by reading the source;
+ *   - a failure that provably billed nothing releases its units;
+ *   - a failure that cannot prove it billed nothing does NOT release them;
+ *   - N parallel calls against a cap of N hand out exactly N units.
+ *
+ * WHAT THE PARALLEL TEST CAN AND CANNOT PROVE. node is single-threaded and the
+ * database here is a fake, so this file cannot prove Postgres's isolation. It
+ * proves the half that lives in TypeScript: the tools take units through ONE
+ * round trip and never a read-then-act pair, and they honour a refusal. To show
+ * the test can actually detect the defect, the same scenario is run against a
+ * fake that models the OLD read-then-act gate and asserted to OVERSPEND.
+ * Postgres's half is proven by the statement in
+ * supabase/migrations/0005_mcp_reservations.sql, run against the real database
+ * with genuinely concurrent connections.
+ *
+ * ---------------------------------------------------------------------------
  * WHAT IS PROVEN HERE, TODAY, WITH NO MODEL KEY:
  *   - every auth branch, including the unconfigured-server branch;
  *   - the JSON-RPC surface: initialize, ping, tools/list, tools/call, unknown
@@ -201,12 +223,36 @@ const DIGEST: DigestRow = {
 
 /* ------------------------------------------------------------- fake tables -- */
 
+interface FakeReservation {
+  id: string;
+  day: string;
+  tool: string;
+  units: number;
+  status: 'reserved' | 'spent' | 'unproven' | 'released';
+  note: string | null;
+}
+
 interface FakeState {
   /** Per-table `count: 'exact'` answers. null models a count that came back
    *  empty — the fail-closed case. */
   counts: Record<string, number | null>;
   rows: Record<string, unknown[]>;
   inserts: { table: string; rows: unknown }[];
+  /** Rows of the fake `mcp_reservations`. */
+  reservations: FakeReservation[];
+  /** The fake `mcp_cap_days.reserved_units`, per Amman day. */
+  reservedByDay: Map<string, number>;
+  /** The highest value that counter ever held, per day. The safety property a
+   *  reservation exists to have is about the PEAK, not the final value. */
+  peakByDay: Map<string, number>;
+  /** Whether the fake reserve is atomic or models the pre-0005 defect. */
+  reserveMode: 'atomic' | 'read_then_act';
+  /** Every RPC the module made, with its arguments. */
+  rpcs: { fn: string; args: Record<string, unknown> }[];
+  /** Every database touch and model call, IN ORDER. This is what makes
+   *  "the reservation came first" a fact about execution rather than a reading
+   *  of the source. */
+  ops: string[];
 }
 
 function freshState(): FakeState {
@@ -222,6 +268,12 @@ function freshState(): FakeState {
       concepts: [],
     },
     inserts: [],
+    reservations: [],
+    reservedByDay: new Map<string, number>(),
+    peakByDay: new Map<string, number>(),
+    reserveMode: 'atomic',
+    rpcs: [],
+    ops: [],
   };
 }
 
@@ -303,6 +355,146 @@ function query(table: string, rows: unknown[]): FakeQuery {
   return q;
 }
 
+/* ------------------------------------------------- the fake reservation store --
+ *
+ * Stands in for supabase/migrations/0005_mcp_reservations.sql: the same
+ * predicate, the same return shape, the same settle-once guard.
+ *
+ * `atomic` mode decides and writes in ONE synchronous run with no await between
+ * them — this harness's stand-in for one statement under a row lock.
+ * `read_then_act` mode reads the total, yields, and acts on the stale number.
+ * That second mode is not a convenience: it is the defect, kept executable so
+ * the parallel test below can be shown to detect it rather than merely pass.
+ * ---------------------------------------------------------------------------- */
+
+interface RpcReply {
+  data: unknown;
+  error: { message: string } | null;
+}
+
+const SETTLE_STATUSES = ['spent', 'unproven', 'released'] as const;
+type SettleStatus = (typeof SETTLE_STATUSES)[number];
+
+function isSettleStatus(value: string): value is SettleStatus {
+  return (SETTLE_STATUSES as readonly string[]).includes(value);
+}
+
+let reservationSeq = 0;
+
+function holdUnits(day: string, units: number): void {
+  const after = (state.reservedByDay.get(day) ?? 0) + units;
+  state.reservedByDay.set(day, after);
+  state.peakByDay.set(day, Math.max(state.peakByDay.get(day) ?? 0, after));
+}
+
+function grantReply(day: string, tool: string, units: number): RpcReply {
+  holdUnits(day, units);
+  reservationSeq += 1;
+  const id = `fake-reservation-${reservationSeq}`;
+  state.reservations.push({ id, day, tool, units, status: 'reserved', note: null });
+  return {
+    data: [
+      {
+        granted: true,
+        reservation_id: id,
+        units_reserved_today: state.reservedByDay.get(day) ?? units,
+      },
+    ],
+    error: null,
+  };
+}
+
+function refusedReply(day: string): RpcReply {
+  return {
+    data: [
+      {
+        granted: false,
+        reservation_id: null,
+        units_reserved_today: state.reservedByDay.get(day) ?? 0,
+      },
+    ],
+    error: null,
+  };
+}
+
+async function fakeReserve(args: Record<string, unknown>): Promise<RpcReply> {
+  const day = String(args.p_day);
+  const tool = String(args.p_tool);
+  const units = Number(args.p_units);
+  const limit = Number(args.p_limit);
+  const durableUsed = Number(args.p_durable_used);
+
+  // greatest(reserved_units, p_durable_used) + p_units <= p_limit — 0005's
+  // predicate, evaluated on the value being written.
+  const fits = (held: number): boolean => Math.max(held, durableUsed) + units <= limit;
+
+  if (state.reserveMode === 'read_then_act') {
+    const stale = state.reservedByDay.get(day) ?? 0;
+    // The yield is the whole defect: every caller decides on a number that was
+    // true before any of them wrote.
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    if (!fits(stale)) return refusedReply(day);
+    return grantReply(day, tool, units);
+  }
+
+  const held = state.reservedByDay.get(day) ?? 0;
+  if (!fits(held)) return refusedReply(day);
+  return grantReply(day, tool, units);
+}
+
+function fakeSettle(args: Record<string, unknown>): RpcReply {
+  const id = String(args.p_reservation);
+  const status = String(args.p_status);
+  const note = args.p_note === null || args.p_note === undefined ? null : String(args.p_note);
+
+  if (!isSettleStatus(status)) {
+    return { data: null, error: { message: `mcp_settle_reservation: bad status "${status}"` } };
+  }
+
+  const row = state.reservations.find((r) => r.id === id) ?? null;
+  // 0005's `and status = 'reserved'` guard. Settling twice changes nothing, so
+  // units can never be refunded twice.
+  if (row === null || row.status !== 'reserved') {
+    return { data: [{ settled_status: 'already_settled', units_released: 0 }], error: null };
+  }
+
+  row.status = status;
+  row.note = note;
+
+  if (status === 'released') {
+    const held = state.reservedByDay.get(row.day) ?? 0;
+    state.reservedByDay.set(row.day, Math.max(0, held - row.units));
+    return { data: [{ settled_status: status, units_released: row.units }], error: null };
+  }
+
+  return { data: [{ settled_status: status, units_released: 0 }], error: null };
+}
+
+async function fakeRpc(fn: string, args: Record<string, unknown>): Promise<RpcReply> {
+  state.ops.push(`rpc:${fn}`);
+  state.rpcs.push({ fn, args });
+
+  // Latency BEFORE the decision, so parallel callers genuinely interleave here
+  // instead of each running to completion in its own turn.
+  await new Promise((resolve) => setTimeout(resolve, 1));
+
+  if (fn === 'mcp_reserve_units') return fakeReserve(args);
+  if (fn === 'mcp_settle_reservation') return fakeSettle(args);
+  return { data: null, error: { message: `mcp.test.ts: no fake for rpc "${fn}"` } };
+}
+
+function unitsHeld(): number {
+  let total = 0;
+  for (const held of state.reservedByDay.values()) total += held;
+  return total;
+}
+
+function peakHeld(): number {
+  let peak = 0;
+  for (const held of state.peakByDay.values()) peak = Math.max(peak, held);
+  return peak;
+}
+
 interface DbStubModule {
   __setDb(factory: () => unknown): void;
 }
@@ -321,7 +513,11 @@ const dbStub = (await import('@/lib/supabase/admin')) as unknown as DbStubModule
 const agentStub = (await import('@/lib/agent/client')) as unknown as AgentStubModule;
 
 dbStub.__setDb(() => ({
-  from: (table: string) => query(table, state.rows[table] ?? []),
+  from: (table: string) => {
+    state.ops.push(`from:${table}`);
+    return query(table, state.rows[table] ?? []);
+  },
+  rpc: (fn: string, args: Record<string, unknown>) => fakeRpc(fn, args),
 }));
 
 /* --------------------------------------------------------- modules under test */
@@ -337,9 +533,20 @@ const { MissingEnvError } = await import('../src/lib/env.ts');
  * no provider key is configured, so this is what a run does today.
  */
 let modelCalls = 0;
+
+/**
+ * What the model call fails with. The default is this repo's honest state — no
+ * provider key — and a test that needs a failure which MAY have been billed
+ * (rather than one refused locally) replaces it.
+ */
+let agentFailure: () => Error = () => new MissingEnvError('OPENROUTER_API_KEY');
+
 agentStub.__setAgentHandler(async () => {
   modelCalls += 1;
-  throw new MissingEnvError('OPENROUTER_API_KEY');
+  // Recorded in the same ordered log as the database touches, so "the units
+  // were reserved before the model was called" is checkable.
+  state.ops.push('agent:call');
+  throw agentFailure();
 });
 
 const {
@@ -361,8 +568,34 @@ const TOKEN = 'tq-mcp-test-token-6f3a91c4';
 function reset(): void {
   state = freshState();
   modelCalls = 0;
+  agentFailure = () => new MissingEnvError('OPENROUTER_API_KEY');
   process.env.MCP_ACCESS_TOKEN = TOKEN;
   delete process.env.MCP_DAILY_GENERATION_CAP;
+}
+
+/** The reservation block every spending tool now returns. */
+interface ReservationReport {
+  id: string;
+  tool: string;
+  units: number;
+  amman_day: string;
+  reserved_after: number;
+  outcome: string;
+  reason: string;
+  recorded: string | null;
+  units_released: number;
+  settlement_error: string | null;
+}
+
+function reservationOf(payload: Record<string, unknown>): ReservationReport {
+  const raw = payload.reservation;
+  assert.ok(typeof raw === 'object' && raw !== null, 'the tool reports its reservation');
+  return raw as ReservationReport;
+}
+
+/** The index of an operation in the ordered log, or -1. */
+function opIndex(op: string): number {
+  return state.ops.indexOf(op);
 }
 
 function post(body: unknown, token?: string): Request {
@@ -806,7 +1039,27 @@ test('check_compliance returns the full Law verdict when the Judge is capped out
   assert.equal(state.inserts.length, 0);
 });
 
-test('check_compliance with no model key records nothing and consumes no cap unit', async () => {
+/**
+ * WHAT THIS TEST USED TO ASSERT, AND WHY THAT WAS WRONG.
+ *
+ * It was called "check_compliance with no model key records nothing and
+ * consumes no cap unit", and it asserted exactly that: no ledger row, and no
+ * cap movement. It passed. It was also a description of the hole.
+ *
+ * By the time the Judge throws MissingEnvError, check_compliance has already
+ * called retrieveCanon(), which embeds the query — a BILLED request, on a
+ * different provider key from the one the Judge wanted. The old code read the
+ * Judge's `spent: false` as a statement about the whole request, wrote no row,
+ * and moved no counter. So with a judge key absent and an embedding key
+ * present, every call bought one embedding and cost the caller nothing: the
+ * cap never moved, and the loop could run forever.
+ *
+ * A test that passes on a hole is worse than no test, because it is cited as
+ * evidence the hole is not there. The correct behaviour, asserted below: the
+ * unit is taken BEFORE the retrieval, and it is NOT given back, because
+ * nothing in this request can prove the embedding was not billed.
+ */
+test('check_compliance with no model key still CONSUMES its unit, because the Canon embedding may have been billed', async () => {
   reset();
   const result = await callTool('check_compliance', { text: 'نص عربي بسيط للتجربة.' });
   const payload = result.structuredContent;
@@ -817,11 +1070,329 @@ test('check_compliance with no model key records nothing and consumes no cap uni
   assert.match(String((judge.unavailable as Record<string, unknown>).reason), /No model provider key/);
 
   assert.equal(modelCalls, 1, 'the Judge was attempted');
-  // requireEnv throws before anything leaves the process, so there is nothing
-  // to charge for and no ledger row to write.
+  // The ruling ledger still records nothing: no Judge ran, so there is no
+  // verdict to record. That part was always right.
   assert.equal(payload.recorded, null);
   assert.equal(state.inserts.length, 0);
   assert.equal(payload.needs_human, true);
+
+  // What changed. The unit was taken, and it stayed taken.
+  const reservation = reservationOf(payload);
+  assert.equal(reservation.units, 1);
+  assert.equal(reservation.outcome, 'unproven', 'not "released" — nothing proves the embedding was free');
+  assert.equal(reservation.units_released, 0);
+  assert.equal(reservation.settlement_error, null);
+  assert.match(reservation.reason, /earlier step/);
+  assert.equal(unitsHeld(), 1, 'the window really is one unit poorer');
+
+  // And the reason is named on the row, so an operator reading the ledger sees
+  // WHY the unit went rather than only that it did.
+  assert.equal(state.reservations.length, 1);
+  assert.equal(state.reservations[0].status, 'unproven');
+  assert.match(String(state.reservations[0].note), /canon retrieval/i);
+});
+
+/* ================================================== the atomic reservation == */
+
+test('the unit is reserved BEFORE the Canon embedding, not after the ruling', async () => {
+  reset();
+  await callTool('check_compliance', { text: 'نص عربي بسيط للتجربة.' });
+
+  const reserved = opIndex('rpc:mcp_reserve_units');
+  const canon = opIndex('from:canon_chunks');
+
+  // Both must have happened, or the ordering claim would be vacuous — the same
+  // sanity check the import walker does before its negative assertion.
+  assert.ok(reserved >= 0, 'a reservation was taken');
+  assert.ok(canon >= 0, 'Canon was retrieved, so there was something to be early to');
+  assert.ok(
+    reserved < canon,
+    `the reservation must precede the embedding; ops were: ${state.ops.join(' -> ')}`,
+  );
+
+  // retrieveCanon -> embed() is the billed step. The reservation is also ahead
+  // of the model call itself, which is the weaker of the two orderings.
+  const agent = opIndex('agent:call');
+  assert.ok(agent >= 0);
+  assert.ok(reserved < agent);
+
+  // One round trip decided it. A read followed by a write is the bug, not the
+  // fix, so there is exactly one reserve call per tool call.
+  const reserves = state.rpcs.filter((r) => r.fn === 'mcp_reserve_units');
+  assert.equal(reserves.length, 1);
+  assert.equal(reserves[0].args.p_units, 1);
+  assert.equal(reserves[0].args.p_limit, DEFAULT_DAILY_GENERATION_CAP);
+  // The day comes from the app's Amman clock, not from the database's now().
+  assert.match(String(reserves[0].args.p_day), /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test('generate_concepts reserves before its first paid call', async () => {
+  reset();
+  await callTool('generate_concepts', { count: 2 });
+
+  const reserved = opIndex('rpc:mcp_reserve_units');
+  const agent = opIndex('agent:call');
+  assert.ok(reserved >= 0 && agent >= 0);
+  assert.ok(reserved < agent, `ops were: ${state.ops.join(' -> ')}`);
+
+  const reserves = state.rpcs.filter((r) => r.fn === 'mcp_reserve_units');
+  assert.equal(reserves.length, 1);
+  assert.equal(reserves[0].args.p_units, 2, 'count units, not one');
+});
+
+test('a PROVEN-unspent failure releases its units', async () => {
+  reset();
+  // conceptsFeature.run() is the FIRST call in this tool that could bill, and
+  // MissingEnvError means requireEnv refused before a request was built. So
+  // here — and only because of that position — "nothing was billed" is a proof
+  // rather than a hope.
+  const payload = (await callTool('generate_concepts', { count: 3 })).structuredContent;
+
+  assert.equal(payload.refusal, 'model_unavailable');
+  const reservation = reservationOf(payload);
+  assert.equal(reservation.units, 3);
+  assert.equal(reservation.outcome, 'released');
+  assert.equal(reservation.units_released, 3);
+  assert.equal(unitsHeld(), 0, 'the units went back to the window');
+  assert.equal(state.reservations[0].status, 'released');
+  assert.match(String(payload.note), /returned to the window/);
+});
+
+test('an UNPROVABLE failure does not release, and the two cases are distinguished', async () => {
+  reset();
+
+  // check_compliance: the Judge also fails locally with MissingEnvError, and
+  // its ModelFailure.spent is also false — the identical flag that used to
+  // decide this. The difference is entirely the step that ran before it.
+  const compliance = reservationOf(
+    (await callTool('check_compliance', { text: 'نص عربي بسيط للتجربة.' })).structuredContent,
+  );
+  assert.equal(compliance.outcome, 'unproven');
+  assert.equal(compliance.units_released, 0);
+
+  // Same process, same error, same spent:false — opposite outcome, because
+  // position in the request is what decides it.
+  const concepts = reservationOf(
+    (await callTool('generate_concepts', { count: 1 })).structuredContent,
+  );
+  assert.equal(concepts.outcome, 'released');
+  assert.equal(concepts.units_released, 1);
+
+  // Net: the compliance unit stayed, the concepts unit came back.
+  assert.equal(unitsHeld(), 1);
+});
+
+test('a failure that MAY have been billed is settled spent, and never released', async () => {
+  reset();
+  const authStub = (await import('@/lib/auth')) as unknown as {
+    HttpError: new (status: number, message: string, hint?: string) => Error;
+  };
+  // An HTTP failure from the provider: the request left the process, so it may
+  // have been charged for.
+  agentFailure = () => new authStub.HttpError(502, 'The provider returned 502.');
+
+  const response = await handleMcpRequest(
+    post(rpc('tools/call', { name: 'generate_concepts', arguments: { count: 2 } }), TOKEN),
+  );
+  const body = await json(response);
+  const payload = (body.result as unknown as ToolCallResult).structuredContent;
+
+  // The tool re-throws, so the caller sees tool_failed — and the units are gone.
+  assert.equal(payload.refusal, 'tool_failed');
+  assert.equal(unitsHeld(), 2, 'a maybe-billed failure keeps its units');
+  assert.equal(state.reservations.length, 1);
+  assert.equal(state.reservations[0].status, 'spent');
+});
+
+test('settling twice cannot refund the same units twice', async () => {
+  reset();
+  await callTool('generate_concepts', { count: 2 });
+  assert.equal(unitsHeld(), 0, 'released once');
+
+  // 0005 guards the settle with `and status = 'reserved'`. Replaying the same
+  // settlement must change nothing — a second refund would be money invented.
+  const reservationId = state.reservations[0].id;
+  const replay = await fakeRpc('mcp_settle_reservation', {
+    p_reservation: reservationId,
+    p_status: 'released',
+    p_note: 'replayed',
+  });
+  assert.deepEqual(replay.data, [{ settled_status: 'already_settled', units_released: 0 }]);
+  assert.equal(unitsHeld(), 0, 'still zero — the second release refunded nothing');
+  assert.equal(state.reservations[0].status, 'released');
+  assert.notEqual(state.reservations[0].note, 'replayed', 'the replay did not overwrite the real reason');
+});
+
+test('the reservation gate refuses in a shaped payload that names what is held', async () => {
+  reset();
+  process.env.MCP_DAILY_GENERATION_CAP = '2';
+  // A maybe-billed failure, so the first call's units stay held.
+  const authStub = (await import('@/lib/auth')) as unknown as {
+    HttpError: new (status: number, message: string, hint?: string) => Error;
+  };
+  agentFailure = () => new authStub.HttpError(502, 'The provider returned 502.');
+
+  await handleMcpRequest(
+    post(rpc('tools/call', { name: 'generate_concepts', arguments: { count: 2 } }), TOKEN),
+  );
+  assert.equal(unitsHeld(), 2, 'the window is now full');
+
+  // The durable count is still 0 — no rows were written — so the cheap
+  // pre-check passes and only the atomic gate can refuse this.
+  assert.equal(state.counts.concepts, 0);
+  const refused = await callTool('generate_concepts', { count: 1 });
+  const payload = refused.structuredContent;
+
+  assert.equal(payload.refusal, 'daily_generation_cap_reached', 'the same code a caller already handles');
+  assert.equal(payload.gate, 'reservation', 'and it says which gate said no');
+  assert.equal(payload.reserved_now, 2);
+  const cap = payload.cap as Record<string, unknown>;
+  assert.equal(cap.limit, 2, 'the refusal names the cap');
+  assert.equal(cap.time_zone, 'Asia/Amman');
+  assert.match(String(cap.resets_at), /^\d{4}/, 'and the instant it resets');
+  const nextSteps = payload.what_you_can_do as string[] | undefined;
+  assert.ok(nextSteps && nextSteps.some((s) => s.includes(String(cap.resets_at))));
+  assert.equal(modelCalls, 1, 'the refused call reached no model');
+});
+
+test('a reservation that cannot be taken is fail-closed, never treated as taken', async () => {
+  reset();
+  // The RPC itself errors. An unreservable window must refuse, exactly as an
+  // uncountable one does — anything else opens the door when the guard breaks.
+  dbStub.__setDb(() => ({
+    from: (table: string) => {
+      state.ops.push(`from:${table}`);
+      return query(table, state.rows[table] ?? []);
+    },
+    rpc: async (fn: string) => {
+      state.ops.push(`rpc:${fn}`);
+      if (fn === 'mcp_reserve_units') return { data: null, error: { message: 'connection reset' } };
+      return { data: [], error: null };
+    },
+  }));
+
+  const result = await callTool('generate_concepts', { count: 1 });
+  assert.equal(result.structuredContent.refusal, 'daily_generation_cap_unknown');
+  assert.equal(result.isError, true);
+  assert.equal(modelCalls, 0, 'nothing was spent while the guard was down');
+
+  // Put the working fake back for everything after this.
+  dbStub.__setDb(() => ({
+    from: (table: string) => {
+      state.ops.push(`from:${table}`);
+      return query(table, state.rows[table] ?? []);
+    },
+    rpc: (fn: string, args: Record<string, unknown>) => fakeRpc(fn, args),
+  }));
+});
+
+/* ------------------------------------------------------------ concurrency -- */
+
+/**
+ * N parallel requests against a cap of N.
+ *
+ * READ THE HEADER for what this can and cannot prove: node is single-threaded
+ * and the database is a fake, so Postgres's isolation is NOT under test here.
+ * What is under test is the half that lives in this repo — that the tools take
+ * their units in one round trip, honour a refusal, and never hand out more than
+ * the cap however the calls interleave. The sensitivity of that claim is
+ * established by the second test below, which runs the identical scenario
+ * against a fake that models the old read-then-act gate and watches it
+ * overspend.
+ */
+test('twenty parallel requests against a cap of 10 hand out exactly 10 units', async () => {
+  reset();
+  process.env.MCP_DAILY_GENERATION_CAP = '10';
+  const authStub = (await import('@/lib/auth')) as unknown as {
+    HttpError: new (status: number, message: string, hint?: string) => Error;
+  };
+  // Maybe-billed, so no reservation gives its units back mid-race and the
+  // ceiling is the only thing that can stop the twentieth caller.
+  agentFailure = () => new authStub.HttpError(502, 'The provider returned 502.');
+
+  const results = await Promise.all(
+    Array.from({ length: 20 }, () =>
+      handleMcpRequest(post(rpc('tools/call', { name: 'generate_concepts', arguments: { count: 1 } }), TOKEN)),
+    ),
+  );
+
+  const payloads = await Promise.all(
+    results.map(async (response) => {
+      const body = await json(response);
+      return (body.result as unknown as ToolCallResult).structuredContent;
+    }),
+  );
+
+  const refusedByCap = payloads.filter((p) => p.refusal === 'daily_generation_cap_reached').length;
+  const granted = payloads.filter((p) => p.refusal !== 'daily_generation_cap_reached').length;
+
+  assert.equal(granted, 10, 'exactly the cap got through');
+  assert.equal(refusedByCap, 10, 'and the rest were refused');
+  assert.equal(unitsHeld(), 10, 'ten units are held, not twenty');
+  assert.equal(peakHeld(), 10, 'and the counter never went above the cap at any instant');
+  assert.equal(modelCalls, 10, 'exactly ten model calls were made');
+  assert.equal(state.reservations.length, 10);
+});
+
+test('the same race with the OLD read-then-act gate overspends — so the test can detect the defect', async () => {
+  reset();
+  process.env.MCP_DAILY_GENERATION_CAP = '10';
+  state.reserveMode = 'read_then_act';
+  const authStub = (await import('@/lib/auth')) as unknown as {
+    HttpError: new (status: number, message: string, hint?: string) => Error;
+  };
+  agentFailure = () => new authStub.HttpError(502, 'The provider returned 502.');
+
+  await Promise.all(
+    Array.from({ length: 20 }, () =>
+      handleMcpRequest(post(rpc('tools/call', { name: 'generate_concepts', arguments: { count: 1 } }), TOKEN)),
+    ),
+  );
+
+  // Every caller decided on a total that was true before any of them wrote, so
+  // every caller passed. This is finding 2, executable. The assertion is `>`
+  // rather than an exact number because how far past the cap it gets depends on
+  // scheduling — which is itself the point: the old gate bounded nothing.
+  assert.ok(
+    unitsHeld() > 10,
+    `a read-then-act gate must overspend, but only ${unitsHeld()} units were handed out`,
+  );
+  assert.ok(modelCalls > 10);
+});
+
+test('the finding, exactly: cap 10 and twenty parallel requests for 8 cannot buy 160', async () => {
+  reset();
+  process.env.MCP_DAILY_GENERATION_CAP = '10';
+  const authStub = (await import('@/lib/auth')) as unknown as {
+    HttpError: new (status: number, message: string, hint?: string) => Error;
+  };
+  agentFailure = () => new authStub.HttpError(502, 'The provider returned 502.');
+
+  await Promise.all(
+    Array.from({ length: 20 }, () =>
+      handleMcpRequest(post(rpc('tools/call', { name: 'generate_concepts', arguments: { count: 8 } }), TOKEN)),
+    ),
+  );
+
+  // 8 fits in 10; a second 8 does not. One caller gets through, the other
+  // nineteen are refused, and 160 generations are not bought.
+  assert.equal(unitsHeld(), 8);
+  assert.equal(peakHeld(), 8);
+  assert.equal(modelCalls, 1);
+  assert.ok(unitsHeld() <= 10, 'never past the cap');
+});
+
+/* ------------------------------------------- the tools that spend nothing -- */
+
+test('get_brand_facts and get_latest_digest reserve nothing and hold no units', async () => {
+  reset();
+  await callTool('get_brand_facts');
+  await callTool('get_latest_digest');
+
+  assert.deepEqual(state.rpcs, [], 'a read-only tool takes no reservation');
+  assert.equal(unitsHeld(), 0);
+  assert.equal(state.reservations.length, 0);
+  assert.equal(modelCalls, 0);
 });
 
 test('get_brand_facts returns facts with sources, and withholds what it should', async () => {

@@ -1,6 +1,6 @@
 /* ============================================================================
  * Pillar C — the MCP server's whole surface: auth, the tool allow-list, the
- * daily spend cap, and the JSON-RPC dispatcher.
+ * daily spend cap and its atomic reservation, and the JSON-RPC dispatcher.
  *
  * The route module (src/app/api/mcp/route.ts) is a four-line adapter over
  * `handleMcpRequest`. Everything that decides anything lives here, so it can be
@@ -317,8 +317,14 @@ export function dailyGenerationCap(): number {
 }
 
 /**
- * The two tables a model-backed MCP call leaves a durable row in. The cap is
- * counted from these, and nowhere else.
+ * The two tables a model-backed MCP call leaves a durable row in.
+ *
+ * WHAT THIS COUNT IS, AND WHAT IT IS NOT. It is the durable record of FINISHED
+ * work in the window, and it is the floor the reservation gate is measured
+ * against. It is NOT, on its own, the thing that bounds spend — it cannot be,
+ * because the artefact is written after the money is gone. The bound is the
+ * atomic reservation further down this file; this count keeps the operator's
+ * own browser work squeezing external callers out of the same ceiling.
  *
  * WHY DURABLE ROWS AND NOT A COUNTER. On Cloudflare Workers there is no process
  * to hold a counter in: every request may land on a fresh isolate, so an
@@ -491,9 +497,20 @@ interface ModelFailure {
   reason: string;
   hint: string | null;
   /**
-   * Whether the failed attempt could have cost anything. `false` means the
-   * call was refused locally before any request left the process, so it does
-   * not consume a cap unit.
+   * Whether THIS ONE CALL could have cost anything. `false` means this call was
+   * refused inside the process before its request was built.
+   *
+   * ITS SCOPE, WHICH IS FINDING 1. This is a fact about one call and about
+   * nothing else in the request. It is NOT a claim that the request billed
+   * nothing: by the time the Judge fails, check_compliance has already
+   * retrieved Canon, and Canon retrieval embeds the query — a billed request
+   * on a DIFFERENT provider key when EMBEDDING_PROVIDER=openai. Reading this
+   * `false` as "the whole request was free" is precisely what let a paid
+   * embedding escape the cap and repeat without limit.
+   *
+   * Whether a request may RELEASE its reserved units is therefore not decided
+   * here. It is decided by `reconcileSpend()`, which reads this flag AND the
+   * `SpendLedger` of every step that ran before the failure.
    */
   spent: boolean;
 }
@@ -518,6 +535,340 @@ function describeModelFailure(err: unknown): ModelFailure {
     // Unknown failures are assumed to have cost something. Conservative in the
     // direction that protects the budget.
     spent: true,
+  };
+}
+
+/* ================================================= the atomic reservation ====
+ *
+ * WHY A COUNTING CAP COULD NOT BOUND SPEND, twice over.
+ *
+ *   1. SPEND PRECEDES THE ARTEFACT. check_compliance called retrieveCanon()
+ *      BEFORE it wrote the row that counted. retrieveCanon -> embed() ->
+ *      openaiEmbed() is a fetch to a paid embeddings endpoint on a DIFFERENT
+ *      key from the one the Judge uses. With no Judge key configured the Judge
+ *      threw locally, `ruling.spent` was false, no row was written, and the
+ *      count never moved — while the embedding had already been paid for. The
+ *      same hole is open with a working Judge key: anything that fails between
+ *      the embedding and the insert spends without counting.
+ *
+ *   2. READ-THEN-ACT IS NOT ATOMIC. `if (cap.used + count > cap.limit)` reads,
+ *      then the feature acts. On a runtime whose model is concurrent isolates,
+ *      N simultaneous requests each observe the same `used`, each pass, and
+ *      each spend. A leaked token was bounded by socket speed, not by the cap.
+ *
+ * The fix is not a better count. It is to stop paying for work before the
+ * accounting for it exists: RESERVE the units atomically BEFORE the first call
+ * that can bill, do the work, then reconcile.
+ *
+ * WHAT COUNTS AS ATOMIC HERE. One statement that both tests the limit and moves
+ * the counter, under the lock of the row it is testing — see
+ * supabase/migrations/0005_mcp_reservations.sql, which quotes the statement and
+ * argues why the locking is sound rather than advisory. Nothing in this file
+ * reads a total and then writes it back; there is one round trip, and the
+ * database decides.
+ * ========================================================================== */
+
+/**
+ * The tools that can spend, and therefore must reserve.
+ *
+ * Mirrors the CHECK constraint on `mcp_reservations.tool`. A name the two
+ * disagree on is rejected by the database, so a future spending tool that
+ * forgets its migration is refused rather than let through — fail-closed, the
+ * same way an unset MCP_ACCESS_TOKEN is. get_brand_facts and get_latest_digest
+ * are absent because they call no model and take no units.
+ */
+export const RESERVING_TOOLS = ['check_compliance', 'generate_concepts'] as const;
+
+export type ReservingTool = (typeof RESERVING_TOOLS)[number];
+
+/**
+ * How a reservation ended.
+ *
+ *   spent    — a billed request provably went out.
+ *   unproven — the request failed and nothing PROVES it billed nothing.
+ *   released — the request failed before anything could bill.
+ *
+ * Only `released` returns units. `unproven` exists because it is the honest
+ * answer far more often than either of the others, and collapsing it into
+ * `released` is exactly the conflation that produced finding 1.
+ */
+export type ReservationOutcome = 'spent' | 'unproven' | 'released';
+
+/**
+ * What may already have been billed inside THIS request.
+ *
+ * A step that may bill announces itself here BEFORE it runs — before, because a
+ * fetch that throws halfway has still been sent, so announcing afterwards would
+ * miss exactly the failures that matter. Units are released only when this
+ * ledger is empty AND the failing call itself provably never left the process.
+ */
+class SpendLedger {
+  private readonly entries: string[] = [];
+
+  /** Call IMMEDIATELY BEFORE a step that may issue a billed request. */
+  mayBill(step: string): void {
+    this.entries.push(step);
+  }
+
+  /** Oldest first. Empty is a proof, not an assumption. */
+  billableSteps(): string[] {
+    return [...this.entries];
+  }
+}
+
+interface Reconciliation {
+  outcome: ReservationOutcome;
+  /** Why, in words, recorded on the reservation row for the operator to read. */
+  reason: string;
+}
+
+/**
+ * THE RELEASE RULE, in one place so it cannot drift between tools.
+ *
+ * Release only when BOTH hold: no earlier step in this request announced that
+ * it might bill, and the failure itself provably never left the process.
+ * Anything else keeps the units. Over-counting costs the caller a request;
+ * under-counting costs the operator money, so when in doubt the units stay.
+ *
+ * `failure === null` means the paid call completed, which is a spend.
+ */
+function reconcileSpend(ledger: SpendLedger, failure: ModelFailure | null): Reconciliation {
+  if (failure === null) {
+    return {
+      outcome: 'spent',
+      reason: 'The model call completed, so a billed request went out.',
+    };
+  }
+
+  if (failure.spent) {
+    return {
+      outcome: 'spent',
+      reason: `The call may have been billed before it failed: ${failure.reason}`,
+    };
+  }
+
+  const earlier = ledger.billableSteps();
+  if (earlier.length === 0) {
+    return {
+      outcome: 'released',
+      reason:
+        'Nothing was billed: the call was refused inside this process before any request ' +
+        `was built, and no earlier step in this request could have billed. (${failure.reason})`,
+    };
+  }
+
+  return {
+    outcome: 'unproven',
+    reason:
+      `The failing call itself billed nothing (${failure.reason}), but ${earlier.length} ` +
+      `earlier step(s) in this request could have: ${earlier.join('; ')}. The units stay ` +
+      'consumed rather than be refunded on a claim nothing proves.',
+  };
+}
+
+/* ------------------------------------------------------- the two RPC calls -- */
+
+/** 0005 returns exactly one row from mcp_reserve_units, granted or not. */
+const reservationGrantSchema = z.array(
+  z.object({
+    granted: z.boolean(),
+    reservation_id: z.string().min(1).nullable(),
+    units_reserved_today: z.number().int().nonnegative(),
+  }),
+);
+
+const settlementSchema = z.array(
+  z.object({
+    settled_status: z.string().min(1),
+    units_released: z.number().int().nonnegative(),
+  }),
+);
+
+export interface Reservation {
+  id: string;
+  tool: ReservingTool;
+  units: number;
+  /** The Amman calendar day the units came out of. */
+  amman_day: string;
+  /** Units held for that day AFTER this grant. */
+  reserved_after: number;
+}
+
+interface ReservationRefused {
+  amman_day: string;
+  /** Units already held for that day — the number `cap` cannot report, because
+   *  `cap` counts finished work and these requests may still be running. */
+  reserved_now: number;
+}
+
+type ReservationAttempt =
+  | { granted: true; reservation: Reservation }
+  | { granted: false; refusal: ReservationRefused };
+
+/**
+ * Take `units` for `tool`, atomically, or come back refused.
+ *
+ * The Amman day is the APP'S, not the database's: 0005 declares `p_day` as a
+ * required parameter and never calls now(), so the window the units come out of
+ * is the same window `cap` was counted over. Two definitions of "today" that
+ * disagree at a midnight boundary would be a cap that resets twice or not at
+ * all.
+ */
+async function reserveUnits(args: {
+  tool: ReservingTool;
+  units: number;
+  cap: CapState;
+  now: Date;
+}): Promise<ReservationAttempt> {
+  const day = ammanIsoDate(args.now);
+
+  const { data, error } = await supabaseAdmin().rpc('mcp_reserve_units', {
+    p_day: day,
+    p_tool: args.tool,
+    p_units: args.units,
+    p_limit: args.cap.limit,
+    p_durable_used: args.cap.used,
+  });
+
+  // FAIL CLOSED, exactly as the count does: a reservation that could not be
+  // taken is not a reservation that succeeded.
+  if (error) {
+    throw new CapUnavailableError(
+      `Reserving ${args.units} unit(s) for ${args.tool} failed: ${error.message}`,
+    );
+  }
+
+  const rows = reservationGrantSchema.parse(data ?? []);
+  if (rows.length !== 1) {
+    throw new CapUnavailableError(
+      `mcp_reserve_units returned ${rows.length} rows where exactly one is expected, ` +
+        'so the reservation is treated as not taken.',
+    );
+  }
+
+  const row = rows[0];
+  if (!row.granted || row.reservation_id === null) {
+    return {
+      granted: false,
+      refusal: { amman_day: day, reserved_now: row.units_reserved_today },
+    };
+  }
+
+  return {
+    granted: true,
+    reservation: {
+      id: row.reservation_id,
+      tool: args.tool,
+      units: args.units,
+      amman_day: day,
+      reserved_after: row.units_reserved_today,
+    },
+  };
+}
+
+export interface Settlement {
+  reservation_id: string;
+  units: number;
+  outcome: ReservationOutcome;
+  reason: string;
+  /** What the database recorded. 'already_settled' when it had settled before. */
+  recorded: string;
+  units_released: number;
+  /** Non-null when settling itself failed. The units then stay consumed. */
+  error: string | null;
+}
+
+/**
+ * Reconcile one reservation. NEVER THROWS.
+ *
+ * By the time this runs the paid work has already happened and the caller must
+ * still get its answer, so a failure here is reported in the payload rather
+ * than raised. A settlement that did not land leaves the row `reserved` and the
+ * units consumed — the direction that costs a request rather than money.
+ */
+async function settleReservation(
+  reservation: Reservation,
+  outcome: ReservationOutcome,
+  reason: string,
+): Promise<Settlement> {
+  const base = {
+    reservation_id: reservation.id,
+    units: reservation.units,
+    outcome,
+    reason,
+  };
+
+  try {
+    const { data, error } = await supabaseAdmin().rpc('mcp_settle_reservation', {
+      p_reservation: reservation.id,
+      p_status: outcome,
+      p_note: reason,
+    });
+    if (error) throw new Error(error.message);
+
+    const rows = settlementSchema.parse(data ?? []);
+    const row = rows.length > 0 ? rows[0] : null;
+    return {
+      ...base,
+      recorded: row === null ? 'no_row_returned' : row.settled_status,
+      units_released: row === null ? 0 : row.units_released,
+      error: null,
+    };
+  } catch (err) {
+    return {
+      ...base,
+      recorded: 'not_settled',
+      units_released: 0,
+      error: err instanceof Error ? err.message : 'The settlement failed.',
+    };
+  }
+}
+
+/** The reservation as a caller sees it: what was taken, and what became of it. */
+function reservationReport(
+  reservation: Reservation,
+  settlement: Settlement | null,
+): Record<string, unknown> {
+  return {
+    id: reservation.id,
+    tool: reservation.tool,
+    units: reservation.units,
+    amman_day: reservation.amman_day,
+    reserved_after: reservation.reserved_after,
+    taken_before: 'the first call in this request that could be billed',
+    outcome: settlement === null ? 'reserved' : settlement.outcome,
+    reason: settlement === null ? 'Still open.' : settlement.reason,
+    recorded: settlement === null ? null : settlement.recorded,
+    units_released: settlement === null ? 0 : settlement.units_released,
+    settlement_error: settlement === null ? null : settlement.error,
+  };
+}
+
+/**
+ * The over-cap answer when the ATOMIC gate refused.
+ *
+ * Deliberately the same `refusal` code as the counted gate — it is the same
+ * fact, and a caller should not have to learn a second string to handle it —
+ * with `gate` naming which of the two said no and `reserved_now` naming how
+ * much of the window is held by requests that have run or are still running.
+ */
+function reservationRefusal(
+  cap: CapState,
+  requested: number,
+  refused: ReservationRefused,
+): Record<string, unknown> {
+  return {
+    ...capRefusal(cap, requested),
+    gate: 'reservation',
+    reserved_now: refused.reserved_now,
+    reason:
+      `The daily cap of ${cap.limit} ${cap.unit} has no room for ${requested} more: ` +
+      `${refused.reserved_now} unit(s) are already reserved for ${refused.amman_day} ` +
+      `(${AMMAN_TIME_ZONE}) by requests that have run or are running.`,
+    note:
+      'Refused by the atomic reservation, before any paid call. Units are taken in one ' +
+      'check-and-increment statement under a row lock, so simultaneous requests cannot ' +
+      'each pass the same check.',
   };
 }
 
@@ -563,7 +914,11 @@ interface JudgeOutcome {
   verdict: JudgeVerdict | null;
   model: string | null;
   unavailable: ModelFailure | null;
-  /** True when a request may actually have been billed. */
+  /**
+   * True when the JUDGE call may actually have been billed. Scoped to the
+   * Judge, like ModelFailure.spent — it says nothing about the Canon retrieval
+   * that ran before it. See reconcileSpend().
+   */
   spent: boolean;
 }
 
@@ -707,25 +1062,39 @@ PARAMETERS
   is recorded on the stored check.
 
 WHAT COMES BACK
-{ "passed", "needs_human", "law": {...}, "judge": {...}, "canon": [...], "cap": {...} }
+{ "passed", "needs_human", "law": {...}, "judge": {...}, "canon": [...],
+  "reservation": {...}, "cap": {...} }
 "passed" is true only when the Judge ruled pass AND the Law found no violation.
+"reservation" says how many cap units this call took, when they were taken, and
+what became of them ("spent", "unproven" or "released").
+
+COST — READ THIS BEFORE RETRYING
+One cap unit is reserved BEFORE any paid work begins, because the brand-canon
+lookup embeds your text and that embedding is billed on its own provider key.
+The unit is therefore consumed even when the Judge cannot rule, and it is
+returned only when the call can prove nothing was billed. A call that comes
+back with judge.status "unavailable" HAS used a unit. Retrying it will use
+another one and produce the same answer.
 
 REFUSAL SHAPES — always a shaped object with a "refusal" key, never prose:
 - "invalid_arguments" — text was empty or over length. Nothing ran.
 - "daily_generation_cap_reached" — the Judge is a model call and the day's cap
   is spent. The LAW RESULTS ARE STILL RETURNED in full: judge.status is
   "refused_daily_cap" and the payload names the cap, what used it, and the
-  exact instant it resets. Read the Law verdict; it is deterministic and
-  complete on its own.
-- "daily_generation_cap_unknown" — the cap could not be counted, so nothing
-  model-backed was attempted. Retry once.
+  exact instant it resets. "gate" says whether the day's finished work filled
+  the cap or whether other in-flight requests hold the remaining units. Read
+  the Law verdict; it is deterministic and complete on its own.
+- "daily_generation_cap_unknown" — the cap could not be counted or the units
+  could not be reserved, so nothing model-backed was attempted. Retry once.
 If no model provider key is configured at all, this is not a refusal: you get
-judge.status "unavailable" with the reason, alongside the full Law verdict.
+judge.status "unavailable" with the reason, alongside the full Law verdict —
+and, per COST above, one unit consumed.
 
 SIDE EFFECTS
-Records the check in the studio's compliance ledger when — and only when — the
-Judge actually ran; that row is what makes the call countable against the cap.
-It reads no Instagram data, triggers no scrape, and changes no brand data.`;
+Reserves one cap unit, then records the check in the studio's compliance ledger
+when — and only when — the Judge actually ran. The reservation is what bounds
+spend; the ledger row is the record of the ruling. It reads no Instagram data,
+triggers no scrape, and changes no brand data.`;
 
 const checkComplianceTool: McpTool = {
   name: 'check_compliance',
@@ -765,9 +1134,13 @@ const checkComplianceTool: McpTool = {
     if (!parsed.success) return invalidArgs('check_compliance', parsed.error);
     const { text, subject } = parsed.data;
 
+    // ONE instant for the whole request: the window `cap` is counted over and
+    // the day the reserved units come out of must be the same day.
+    const now = new Date();
+
     let cap: CapState;
     try {
-      cap = await readCapState();
+      cap = await readCapState(now);
     } catch (err) {
       if (err instanceof CapUnavailableError) return result(capUnknownRefusal(err), true);
       throw err;
@@ -800,6 +1173,52 @@ const checkComplianceTool: McpTool = {
       });
     }
 
+    /* -- THE RESERVATION, AND WHY IT IS HERE -----------------------------
+     * BEFORE retrieveCanon, not after it. Canon retrieval embeds the query,
+     * and that embedding is a billed request on a different provider key when
+     * EMBEDDING_PROVIDER=openai. This file deliberately does not import the
+     * embedder to find out which provider is configured: it does not need to,
+     * because taking the unit first bounds the spend either way, and a gate
+     * that has to know how its callee is configured is a gate that goes stale.
+     * ------------------------------------------------------------------ */
+    let attempt: ReservationAttempt;
+    try {
+      attempt = await reserveUnits({ tool: 'check_compliance', units: 1, cap, now });
+    } catch (err) {
+      if (err instanceof CapUnavailableError) return result(capUnknownRefusal(err), true);
+      throw err;
+    }
+
+    if (!attempt.granted) {
+      return result({
+        tool: 'check_compliance',
+        subject,
+        passed: false,
+        needs_human: true,
+        law: lawSummary(law),
+        judge: {
+          status: 'refused_daily_cap' satisfies JudgeStatus,
+          verdict: null,
+          model: null,
+          ...reservationRefusal(cap, 1, attempt.refusal),
+        },
+        canon: [],
+        recorded: null,
+        cap,
+        note: 'The Law ran and is complete. Only the model-backed Judge was refused.',
+        grounding: 'data' satisfies Grounding,
+      });
+    }
+
+    const reservation = attempt.reservation;
+    const ledger = new SpendLedger();
+
+    // Announced BEFORE the call. From here on nothing in this request can prove
+    // it billed nothing, so nothing in this request may release these units.
+    ledger.mayBill(
+      'canon retrieval, which embeds the query (a billed request when EMBEDDING_PROVIDER=openai)',
+    );
+
     const canon = await retrieveCanon('brand voice, colour usage, social copy standards', {
       tags: ['voice', 'color', 'social', 'arabic-specific'],
       k: 5,
@@ -816,10 +1235,20 @@ const checkComplianceTool: McpTool = {
     const passed =
       ruling.verdict !== null && ruling.verdict.verdict === 'pass' && law.violations.length === 0;
 
-    // The row is the unit of account, so it is written exactly when a model
-    // call may have been billed. A MissingEnvError never left this process, so
-    // it writes nothing and consumes no cap unit — refusing to charge for work
-    // that provably did not happen.
+    /* -- RECONCILE -------------------------------------------------------
+     * Settled before the ledger row is written, so the accounting is right
+     * even if that insert fails. `ruling.unavailable` is scoped to the Judge;
+     * reconcileSpend weighs it against everything that ran earlier, which is
+     * why a Judge that refused locally AFTER a Canon embedding settles
+     * `unproven` rather than releasing.
+     * ------------------------------------------------------------------ */
+    const reconciled = reconcileSpend(ledger, ruling.unavailable);
+    const settlement = await settleReservation(reservation, reconciled.outcome, reconciled.reason);
+
+    // The compliance_checks row is the RULING ledger — the same one
+    // /api/compliance writes — and is written exactly when a Judge call may
+    // have been billed. It is no longer the unit of account: the reservation
+    // above is, and it was taken before any of this could cost anything.
     let recorded: { id: string; created_at: string } | null = null;
     if (ruling.spent) {
       const { data, error } = await supabaseAdmin()
@@ -860,6 +1289,7 @@ const checkComplianceTool: McpTool = {
       },
       canon: canonSummary(canon),
       recorded,
+      reservation: reservationReport(reservation, settlement),
       cap: await readCapState(),
       grounding: 'data' satisfies Grounding,
     });
@@ -926,7 +1356,7 @@ external caller cannot escalate spend.
 
 WHAT COMES BACK
 { "concepts": [...], "stored": {...}, "law": {...}, "judge": {...},
-  "passed", "needs_human", "usage", "cap": {...} }
+  "passed", "needs_human", "usage", "reservation": {...}, "cap": {...} }
 "needs_human" is true whenever the Judge failed the batch or could not rule.
 Concepts are stored regardless — as drafts, flagged — because hiding rejected
 work from the operator is worse than showing it with its verdict attached.
@@ -936,15 +1366,19 @@ REFUSAL SHAPES — always a shaped object with a "refusal" key, never prose:
   Nothing ran and nothing was counted.
 - "daily_generation_cap_reached" — returned BEFORE any model call when the day
   has no room for "count" more. The payload names the limit, what has been used,
-  the env var that moves it, and the exact instant it resets. Do not retry
-  before then; retrying cannot succeed.
+  the env var that moves it, and the exact instant it resets. "gate" says which
+  check refused: "reservation" means other requests in this same window already
+  hold the units, so the answer can differ from what "cap" alone suggests. Do
+  not retry before the reset; retrying cannot succeed.
 - "model_unavailable" — no model provider key is configured on this deployment.
-  Nothing was spent and nothing was counted; this needs an operator, not a
-  retry.
+  The reserved units are RELEASED here, because this refusal happens inside the
+  process before the first call that could bill — "reservation.outcome" says
+  "released" and proves it. This needs an operator, not a retry.
 
 SIDE EFFECTS
-Inserts draft concept rows. Reads no Instagram data, triggers no scrape and
-spends nothing on Apify — it cannot: no scraping code is reachable from here.`;
+Reserves "count" cap units before any paid work, then inserts draft concept
+rows. Reads no Instagram data, triggers no scrape and spends nothing on Apify —
+it cannot: no scraping code is reachable from here.`;
 
 const generateConceptsTool: McpTool = {
   name: 'generate_concepts',
@@ -992,33 +1426,72 @@ const generateConceptsTool: McpTool = {
     if (!parsed.success) return invalidArgs('generate_concepts', parsed.error);
     const { count, theme, account } = parsed.data;
 
+    // ONE instant for the whole request, as in check_compliance.
+    const now = new Date();
+
     let cap: CapState;
     try {
-      cap = await readCapState();
+      cap = await readCapState(now);
     } catch (err) {
       if (err instanceof CapUnavailableError) return result(capUnknownRefusal(err), true);
       throw err;
     }
 
-    // Checked BEFORE the model call, and against what this call would ADD —
-    // not merely against whether any room is left at all. Asking for 5 with 2
-    // remaining is refused up front rather than half-served.
+    // A cheap early refusal against the durable count, kept because it answers
+    // without touching the reservation ledger and because it is checked against
+    // what this call would ADD rather than merely against whether any room is
+    // left: asking for 5 with 2 remaining is refused up front, not half-served.
+    //
+    // IT IS NOT THE GATE. It is a read, and a read cannot bound spend — N
+    // concurrent isolates each pass it. The gate is the reservation below.
     if (cap.used + count > cap.limit) {
       return result(capRefusal(cap, count));
     }
 
-    let outcome;
+    /* -- THE RESERVATION ---------------------------------------------------
+     * Taken before conceptsFeature.run(), which is this tool's first paid call.
+     * One statement decides; twenty simultaneous requests contend on one row
+     * and at most `limit` units are ever handed out.
+     * -------------------------------------------------------------------- */
+    let attempt: ReservationAttempt;
+    try {
+      attempt = await reserveUnits({ tool: 'generate_concepts', units: count, cap, now });
+    } catch (err) {
+      if (err instanceof CapUnavailableError) return result(capUnknownRefusal(err), true);
+      throw err;
+    }
+
+    if (!attempt.granted) {
+      return result(reservationRefusal(cap, count, attempt.refusal));
+    }
+
+    const reservation = attempt.reservation;
+    const ledger = new SpendLedger();
+
+    let outcome: Awaited<ReturnType<typeof conceptsFeature.run>>;
     try {
       outcome = await conceptsFeature.run({ count, theme, account }, MCP_QUALITY);
     } catch (err) {
       const failure = describeModelFailure(err);
+      const reconciled = reconcileSpend(ledger, failure);
+      const settlement = await settleReservation(reservation, reconciled.outcome, reconciled.reason);
+
       if (!failure.spent) {
         return result(
           {
             refusal: 'model_unavailable',
             reason: failure.reason,
             hint: failure.hint,
-            note: 'Nothing left this process, so nothing was spent and nothing was counted against the daily cap.',
+            // The ledger is empty here — conceptsFeature.run() is the FIRST
+            // call in this request that could bill — so a local refusal really
+            // does prove nothing was spent, and the units go back. That is a
+            // proof about this position in this tool, not a property of
+            // `spent: false` in general.
+            note:
+              reconciled.outcome === 'released'
+                ? 'Nothing left this process, so nothing was spent and the reserved units were returned to the window.'
+                : 'The failing call left nothing, but an earlier step in this request could have billed, so the reserved units stay consumed.',
+            reservation: reservationReport(reservation, settlement),
             cap,
             grounding: 'data' satisfies Grounding,
           },
@@ -1027,6 +1500,14 @@ const generateConceptsTool: McpTool = {
       }
       throw err;
     }
+
+    // The model answered: the money is gone. Settled here, before the review
+    // leg below, so the ledger records the spend even if the review throws.
+    const settlement = await settleReservation(
+      reservation,
+      'spent',
+      'conceptsFeature.run() completed, so a billed model call went out.',
+    );
 
     // Re-validated against the feature's own schema rather than cast: the
     // outcome is typed `unknown` at this boundary and a cast here would be a
@@ -1042,6 +1523,13 @@ const generateConceptsTool: McpTool = {
      * real runLaw, the real Canon retrieval, the real runJudge, the real
      * reconcile. This costs one extra context read, which is stated rather than
      * hidden.
+     *
+     * NO SECOND RESERVATION IS TAKEN. The review is part of the request the
+     * caller already reserved `count` units for, and the tool's own description
+     * says `count` is what the call consumes — charging again here would make
+     * that documentation false. It is covered rather than uncounted: the units
+     * were taken before any of it could bill, which is the property finding 1
+     * was about.
      * -------------------------------------------------------------------- */
     const { blocks, swatches, voiceExamples } = await loadBrainContext();
     const candidate = conceptsToText(concepts);
@@ -1086,6 +1574,7 @@ const generateConceptsTool: McpTool = {
       needs_human: ruling.verdict === null || ruling.verdict.verdict === 'fail' || ruling.verdict.needs_human,
       model: outcome.model,
       usage: outcome.usage,
+      reservation: reservationReport(reservation, settlement),
       cap: await readCapState(),
       grounding: 'data' satisfies Grounding,
     });
