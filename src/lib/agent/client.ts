@@ -9,7 +9,26 @@ import { effortFor, modelFor, providerKeyName, resolveProvider, type Provider } 
 export type { Quality };
 export { modelFor, resolveProvider };
 
-/** Wall-clock ceiling for one generation, below the route's maxDuration. */
+/**
+ * Wall-clock ceiling on one OpenRouter call, applied by us via AbortController.
+ *
+ * It used to be described as sitting "below the route's maxDuration". On
+ * Cloudflare Workers that is no longer true and the number no longer means
+ * that: `maxDuration` is a Vercel construct and is inert here — nothing on the
+ * platform reads it. What this constant actually governs now is how long we
+ * hold an inbound connection open, unstreamed, waiting for a reply before
+ * giving the operator a 504 instead of a hung tab.
+ *
+ * Workers bound CPU time, not wall clock, and time spent awaiting `fetch` is
+ * not CPU time — so a slow model does not by itself approach any platform
+ * limit. That makes this a client-side courtesy ceiling we choose, not a
+ * platform contract we are staying under. It can be raised or lowered on
+ * product grounds (how long is it reasonable to make someone stare at a
+ * spinner) without consulting any Cloudflare limit.
+ *
+ * Applies to the OpenRouter path only. The Anthropic path streams through the
+ * SDK and has no equivalent ceiling.
+ */
 const REQUEST_TIMEOUT_MS = 280_000;
 
 let anthropicClient: Anthropic | null = null;

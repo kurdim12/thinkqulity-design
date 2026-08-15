@@ -8,6 +8,17 @@ build/
 .env
 .env.local
 .env*.local
+# Wrangler's local secret file. Holds the same real keys as .env.local and is
+# read by `opennextjs-cloudflare preview`. Never commit it.
+.dev.vars
+.dev.vars*
+
+# Cloudflare Workers build output and local state.
+# .open-next/ is NOT just build output: the adapter compiles .env* values into
+# .open-next/cloudflare/next-env.mjs, so a build made with a populated
+# .env.local contains real secrets. It must stay ignored.
+.open-next/
+.wrangler/
 
 # Client data exports: real engagement JSON stays out of git
 data-exports/

@@ -166,8 +166,13 @@ export interface MirrorMediaResult {
   reason: string | null;
   /** The caps this pass actually enforced, so a report can state them. */
   cap: { max_objects: number; max_object_bytes: number };
-  /** Candidates handed in. */
-  considered: number;
+  /**
+   * Candidates handed in. Null when the caller checked the flag first and never
+   * built a candidate list, so there is nothing to count — absent, not zero
+   * (hard rule 2). A pass that was handed candidates always reports a number,
+   * including a disabled one, because it really did receive them.
+   */
+  considered: number | null;
   /** Downloads started. Never more than `cap.max_objects`. */
   attempted: number;
   /** Objects written to the bucket by this pass. */
@@ -353,7 +358,9 @@ function describe(result: MirrorMediaResult): string[] {
 
   if (!result.enabled) {
     lines.push(
-      `MIRROR_MEDIA is off: ${result.considered} post(s) were considered and nothing was downloaded or stored.`,
+      result.considered === null
+        ? 'MIRROR_MEDIA is off: the pass was skipped before its candidates were read, so nothing was read, downloaded or stored.'
+        : `MIRROR_MEDIA is off: ${result.considered} post(s) were considered and nothing was downloaded or stored.`,
     );
     return lines;
   }
@@ -409,12 +416,76 @@ function describe(result: MirrorMediaResult): string[] {
 }
 
 /**
+ * MIRROR_MEDIA, for a caller that must decide whether to do the work that
+ * PRODUCES this module's argument.
+ *
+ * mirrorPostMedia() checks the flag itself and always will — that is the pass's
+ * own guard and nothing may depend on a caller remembering it. This exists
+ * because checking it there is too late for the CALLER: /api/monitor builds its
+ * candidate list by reading up to MAX_POSTS_SCAN rows of `posts.raw` back out of
+ * Postgres, which at the import ceiling is the whole scrape payload a second
+ * time and the largest single allocation in that route. A pass that is off by
+ * default must not cost that. The value still comes from `mirrorMedia()`, so the
+ * env key keeps exactly one reader.
+ */
+export function mirrorMediaEnabled(): boolean {
+  return mirrorMedia();
+}
+
+/**
+ * The shape of a pass that did not run. `considered` is a count when candidates
+ * were handed over and null when the caller skipped building them.
+ */
+function disabledResult(considered: number | null, cap: number): MirrorMediaResult {
+  const result: MirrorMediaResult = {
+    enabled: false,
+    reason:
+      'MIRROR_MEDIA is not enabled. Post media was not downloaded and nothing was written to storage.',
+    cap: { max_objects: cap, max_object_bytes: MAX_OBJECT_BYTES },
+    considered,
+    attempted: 0,
+    mirrored: 0,
+    already_mirrored: 0,
+    skipped: { no_media_url: 0, untrusted_host: 0, unsafe_id: 0, over_cap: 0 },
+    failed: { download: 0, not_image: 0, too_large: 0, upload: 0 },
+    bytes_stored: 0,
+    index_complete: true,
+    error: null,
+    warnings: [],
+  };
+  result.warnings = describe(result);
+  return result;
+}
+
+/**
+ * The report of a pass that was never attempted, because the flag is off and the
+ * caller therefore never built its candidates.
+ *
+ * THE REPORTING CONTRACT IS THE POINT. "Did not run" and "ran and mirrored
+ * nothing" have to stay apart, and they do: this returns `enabled: false` with a
+ * reason, where a pass that ran returns `enabled: true` with counts it measured.
+ * The only field that differs from a disabled pass that WAS handed candidates is
+ * `considered`, which is null here — no list was built, so its size is absent
+ * rather than zero, and the Data screen renders absent as an em-dash.
+ *
+ * The caps are the module's constants, so a report can still state the ceiling
+ * that would have applied. Nothing here reads the environment beyond the flag
+ * and nothing here touches the network.
+ */
+export function skippedMirrorReport(): MirrorMediaResult {
+  return disabledResult(null, MAX_MIRROR_OBJECTS);
+}
+
+/**
  * Mirrors post thumbnails into the private bucket, when MIRROR_MEDIA is on.
  *
  * When the flag is off this returns immediately with `enabled: false`, a
  * `reason`, and `considered` set to however many posts it was handed — a report
  * that it did nothing, not a silent skip. The counts are zero because zero
- * downloads happened, which is a measurement and not an absence.
+ * downloads happened, which is a measurement and not an absence. A caller that
+ * would have to do real work to produce `posts` should call mirrorMediaEnabled()
+ * first and report skippedMirrorReport() instead; this early return cannot
+ * refund an allocation that already happened to build its argument.
  *
  * It never throws. Every per-post failure is a counted outcome, and an
  * unexpected failure anywhere else lands in `error` with whatever counts had
@@ -432,8 +503,12 @@ export async function mirrorPostMedia(
       ? Math.min(requested, MAX_MIRROR_OBJECTS)
       : MAX_MIRROR_OBJECTS;
 
+  // The pass's own guard, kept whatever the caller did: this module decides
+  // whether it runs, and it reports the same way from either entry point.
+  if (!mirrorMediaEnabled()) return disabledResult(posts.length, cap);
+
   const result: MirrorMediaResult = {
-    enabled: mirrorMedia(),
+    enabled: true,
     reason: null,
     cap: { max_objects: cap, max_object_bytes: MAX_OBJECT_BYTES },
     considered: posts.length,
@@ -447,13 +522,6 @@ export async function mirrorPostMedia(
     error: null,
     warnings: [],
   };
-
-  if (!result.enabled) {
-    result.reason =
-      'MIRROR_MEDIA is not enabled. Post media was not downloaded and nothing was written to storage.';
-    result.warnings = describe(result);
-    return result;
-  }
 
   try {
     /* --- 1. classify every candidate, before a single byte is requested --- */

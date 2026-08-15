@@ -8,6 +8,9 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
+    "cf:build": "node scripts/cf-build.mjs",
+    "cf:preview": "npm run cf:build && opennextjs-cloudflare preview",
+    "cf:deploy": "npm run cf:build && opennextjs-cloudflare deploy",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "seed": "node --env-file=.env.local --experimental-strip-types scripts/seed.ts",
     "doctor": "node --env-file=.env.local scripts/doctor.mjs",
@@ -35,9 +38,11 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@opennextjs/cloudflare": "^1.20.2",
     "@types/node": "^22.10.5",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "wrangler": "^4.123.0"
   }
 }

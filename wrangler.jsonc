@@ -1,0 +1,194 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+
+  // Derived the way @opennextjs/cloudflare's own `getWorkerName()` derives it:
+  // the package.json name, lowercased, with anything outside [a-z0-9-] stripped.
+  "name": "thinkquality-studio",
+  "main": ".open-next/worker.js",
+
+  // Derived the way the adapter derives it (dist/cli/utils/create-wrangler-config.js
+  // -> getLatestCompatDate): it fetches the LATEST PUBLISHED `workerd` from the
+  // npm registry and reads the date out of its `major.yyyymmdd.patch` version,
+  // capped at today.
+  //
+  // MIND THE GAP. That is the registry's latest, NOT the workerd this lockfile
+  // pins. The `workerd` actually INSTALLED here is 1.20260811.1
+  // (node_modules/workerd/package.json) — a transitive dependency, pinned to
+  // that exact version by miniflare 5.20260811.1-alpha and wrangler 4.123.0
+  // (`npm ls workerd`); it is not a dependency of this project. Its npm wrapper
+  // advertises `compatibilityDate` = "2026-08-11" (node_modules/workerd/lib/
+  // main.js), which is what `require('workerd').compatibilityDate` returns.
+  //
+  // The BINARY's ceiling is later than that. Run directly with a config asking
+  // for 2026-08-14 it loads with no date complaint; asked for 2026-09-01 it
+  // refuses with 'This Worker requires compatibility date "2026-09-01", but the
+  // newest date supported by this server binary is "2026-08-18".' (observed
+  // 2026-08-15 by running node_modules/@cloudflare/workerd-windows-64/bin/
+  // workerd.exe against a one-line worker). So TODAY there is no gap:
+  // `opennextjs-cloudflare preview` — which is `wrangler dev` -> miniflare ->
+  // that binary — runs the same 2026-08-14 semantics production gets, and the
+  // local check DEPLOY.md §5 relies on is telling the truth.
+  //
+  // WHAT HAPPENS IF THEY DIVERGE, i.e. if this date is ever moved past the
+  // installed binary's ceiling (2026-08-18 for 1.20260811.1): preview does not
+  // clamp and carry on. workerd rejects the worker's config with the error
+  // quoted above and exits instead of serving. Miniflare separately rejects any
+  // date after today's UTC date (ERR_FUTURE_COMPATIBILITY_DATE), and workerd
+  // does the same ("Can't set compatibility date in the future"). wrangler
+  // still carries a handler for an older fallback warning, matched on the
+  // prefix "The latest compatibility date supported by" (wrangler-dist/cli.js,
+  // WranglerLog.warn) — but nothing in this tree emits that message any more,
+  // so do not expect a silent fallback. Deploying is unaffected either way:
+  // Cloudflare's edge runs a current workerd.
+  //
+  // Closing a real gap means updating `wrangler`, which brings its pinned
+  // miniflare and workerd with it — NOT editing the date below down to match an
+  // older local binary, which would move production backwards to fix a
+  // local-only mismatch.
+  //
+  // It must stay at or after 2024-09-23 regardless: that is the date from which
+  // `nodejs_compat` means full Node.js compatibility rather than the old partial
+  // polyfill set (miniflare's NODEJS_COMPAT_V2_SWITCH_OVER_DATE). OpenNext runs
+  // the Next.js server as Node.js code.
+  "compatibility_date": "2026-08-14",
+  "compatibility_flags": [
+    // Required by OpenNext. The bundled Next.js server imports `node:*` builtins
+    // (async_hooks, buffer, stream, crypto); without Node compatibility the
+    // Worker fails while loading its modules, which returns no useful
+    // diagnostics at all.
+    //
+    // At a compatibility_date of 2026-08-04 or later the flag is ON BY DEFAULT
+    // (miniflare's NODEJS_COMPAT_DEFAULT_ON_DATE), so at the date above this
+    // line is redundant and is kept as an explicit statement, not because
+    // loading would fail without it. Two consequences worth knowing: the raw
+    // workerd binary treats a redundant flag as a config ERROR ("The
+    // compatibility flag nodejs_compat became the default as of 2026-08-04 so
+    // does not need to be specified anymore" — observed on 1.20260811.1), and
+    // miniflare strips redundant nodejs_compat flags before handing the config
+    // over (stripRedundantNodejsCompatFlags in miniflare/dist/src/index.js), so
+    // preview never sends it. Whether the upload API is equally strict on
+    // deploy was not verified from this tree; `wrangler deploy --dry-run` does
+    // not exercise it.
+    "nodejs_compat",
+
+    // Required. Makes every outbound fetch() take the real public-internet path
+    // instead of Workers' default same-zone shortcut, so requests to Supabase,
+    // OpenRouter and Apify behave like they do under `next start`. Without it,
+    // a fetch to a hostname that resolves onto Cloudflare can loop back into
+    // this same Worker instead of leaving it.
+    "global_fetch_strictly_public"
+  ],
+
+  "assets": {
+    // Both values are produced by `opennextjs-cloudflare build`; they are the
+    // adapter's fixed output paths, not preferences.
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+
+  // ===================================================================== //
+  // DO NOT DELETE THIS LINE. It is load-bearing and looks like boilerplate.
+  //
+  // Workers bound CPU time, not wall clock — time spent waiting on Supabase,
+  // OpenRouter or Apify does not count. But the PAID (Standard) default ceiling
+  // is 30_000 ms, and this app declares far more work than that: seven routes
+  // set `maxDuration = 300` (audience, board/analyze, comments, compliance,
+  // generate/[feature], monitor, profile), one sets 120 (refresh) and one sets
+  // 60 (ingest) — nine routes above the 30s default.
+  //
+  // Note that `maxDuration` itself is INERT here: it is a Vercel construct and
+  // nothing on Workers reads it (see the comment at src/lib/agent/client.ts:15).
+  // This `cpu_ms` value is the only ceiling that actually applies, so deleting
+  // it silently reinstates 30s and those nine routes start dying mid-request.
+  //
+  // 300000 ms = 300 s, matching the longest declared route budget.
+  // ===================================================================== //
+  "limits": { "cpu_ms": 300000 },
+
+  // Pin execution beside the database. Supabase for this app is in EU-Central
+  // (Frankfurt) and EVERY route is database-bound: `next build` renders all 44
+  // entries in its route table as `ƒ (Dynamic)` — zero static, zero SSG. Of the
+  // 43 route/page modules under src/app, 30 say so outright with
+  // `export const dynamic = 'force-dynamic'` (all 28 route.ts, plus login and
+  // auth/callback); the other 13 page.tsx are dynamic by inference, because the
+  // `(app)` layout reads cookies through `getOperator()` and src/app/page.tsx
+  // redirects. Either way nothing is served from cache, and every request makes
+  // at least one Supabase round trip, usually several in sequence.
+  //
+  // Without the hint, placement optimises for proximity to the VIEWER, which for
+  // this app means Amman. That would put the Worker one continent away from the
+  // data and turn each sequential query into a transcontinental round trip —
+  // i.e. "edge" placement makes this specific app SLOWER, not faster.
+  "placement": { "mode": "smart", "hint": "aws:eu-central-1" },
+
+  // Workers Logs. Needed to see a 1102 (isolate out of memory) or an exception
+  // after the fact; without it a failed request leaves no trace to read.
+  "observability": { "enabled": true }
+
+  // ------------------------------------------------------------------ //
+  // ENVIRONMENT BINDINGS — deliberately absent from this file.
+  //
+  // src/lib/env.ts is the authority on the key set (the `EnvKey` union and the
+  // total `ENV_SPECS` record classify every key as required/optional and as
+  // secret/var). Read it there; do not maintain a second list here.
+  //
+  // Nothing is written here because no key in that table has a value that is
+  // both non-secret and known:
+  //   - the credentials (SUPABASE_SERVICE_ROLE_KEY, OPENROUTER_API_KEY,
+  //     ANTHROPIC_API_KEY, OPENAI_API_KEY, APIFY_TOKEN) and ALLOWED_EMAILS must
+  //     never enter a tracked file — bind them with `wrangler secret put NAME`;
+  //   - NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY are
+  //     public-by-design (they are inlined into the client bundle regardless),
+  //     so a `vars` block is an honest home for them; `wrangler secret put`
+  //     lands on process.env identically if you prefer to keep them out of git.
+  //     DEPLOY.md §2 covers both. Nothing is pre-filled here — the operator
+  //     chooses;
+  //   - every remaining var (AI_PROVIDER, AI_MODEL_*, APIFY_ACTOR,
+  //     APIFY_PROFILES, APIFY_BUDGET_USD, COMMENTS_TOP_N, COMMENTS_PER_POST,
+  //     MIRROR_MEDIA, IG_HANDLE_*, EMBEDDING_*) is an OVERRIDE with a documented
+  //     default in code. Writing the defaults out here would duplicate them and
+  //     let the two drift. Add a `vars` block only to override one, and only
+  //     with a value the operator actually chose — APIFY_BUDGET_USD in
+  //     particular has no honest default and must not be guessed.
+  //
+  // Locally, `opennextjs-cloudflare preview` reads `.dev.vars` (gitignored).
+  // `GET /api/health` reports which bindings are actually present at runtime.
+  //
+  // Two things that bite, both consequences of how the adapter builds:
+  //   1. `next build` runs with the AMBIENT environment, not with these
+  //      bindings. src/lib/supabase/browser.ts:12-13 reads
+  //      process.env.NEXT_PUBLIC_SUPABASE_{URL,ANON_KEY} as literal property
+  //      accesses, which Next inlines into the CLIENT bundle at build time.
+  //      Those two must therefore be present when `cf:build` runs, not only on
+  //      the deployed Worker.
+  //   2. Conversely, the adapter compiles `.env*` files into the worker bundle
+  //      (dist/cli/build/open-next/compile-env-files.js -> .open-next/cloudflare/
+  //      next-env.mjs, imported by the worker). Building with a populated
+  //      .env.local bakes those values, secrets included, into .open-next/ and
+  //      from there into what `deploy` uploads. `npm run cf:build`
+  //      (scripts/cf-build.mjs) exists to prevent exactly that: it leaves only
+  //      the NEXT_PUBLIC_* entries visible to the adapter for the duration of
+  //      the build and fails on any leak it can detect. Running
+  //      `opennextjs-cloudflare build` directly bypasses it. .open-next/ is
+  //      gitignored — keep it that way, and see DEPLOY.md §2 and §5.
+  // ------------------------------------------------------------------ //
+
+  // ------------------------------------------------------------------ //
+  // OMITTED FROM THE ADAPTER'S TEMPLATE, each for a checked reason:
+  //
+  //   "r2_buckets" (NEXT_INC_CACHE_R2_BUCKET) and the WORKER_SELF_REFERENCE
+  //   "services" entry — both exist to serve the incremental cache and its
+  //   revalidation queue. There is no ISR/SSG output in this app to cache: every
+  //   entry in the build's route table is `ƒ (Dynamic)` (see the placement note
+  //   above for how the 43 modules get there) and not one of them declares
+  //   `export const revalidate` — the whole tree has zero occurrences of it.
+  //   See open-next.config.ts, where incrementalCache is commented out to match.
+  //
+  //   "images" (the IMAGES binding) — enables the next/image optimizer. This app
+  //   does not use next/image: the only remote images are Supabase Storage URLs
+  //   rendered through a plain <img> (src/app/(app)/brand/page.tsx:370-374), and
+  //   next.config.ts configures no `images.remotePatterns`.
+  //
+  // Restore the relevant block if either assumption stops holding.
+  // ------------------------------------------------------------------ //
+}
