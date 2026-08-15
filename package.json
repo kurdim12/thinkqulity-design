@@ -15,6 +15,7 @@
     "seed": "node --env-file=.env.local --experimental-strip-types scripts/seed.ts",
     "doctor": "node --env-file=.env.local scripts/doctor.mjs",
     "login": "node --env-file=.env.local scripts/login-link.mjs",
+    "set-password": "node --env-file=.env.local scripts/set-password.mjs",
     "ingest:knowledge": "node --env-file=.env.local scripts/ingest-knowledge.mjs",
     "assets": "node --env-file=.env.local scripts/upload-assets.mjs",
     "ingest:canon": "node --env-file=.env.local scripts/ingest-canon.mjs",

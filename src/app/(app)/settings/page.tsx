@@ -1,10 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Badge, Card, Descriptions, List, Segmented, Tag, Typography } from 'antd';
+import { Badge, Button, Card, Descriptions, Form, Input, List, Segmented, Tag, Typography, App } from 'antd';
 import { useLocale } from '@/lib/i18n/LocaleContext';
 import { useQuality } from '@/components/Providers';
-import { apiGet, describeError } from '@/lib/client/api';
+import { apiGet, apiSend, describeError } from '@/lib/client/api';
 import { PageHeader, ErrorState, LoadingBlock } from '@/components/ui';
 
 interface HealthCheck {
@@ -25,11 +25,46 @@ interface HealthResponse {
 
 export default function SettingsPage() {
   const { t, tt } = useLocale();
+  const { message } = App.useApp();
   const { quality, setQuality } = useQuality();
   const [data, setData] = useState<HealthResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);
+
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordBusy, setPasswordBusy] = useState(false);
+
+  async function changePassword() {
+    if (newPassword.length < 10) {
+      message.error(
+        tt('كلمة المرور الجديدة يجب ألا تقل عن ١٠ أحرف.', 'The new password must be at least 10 characters.'),
+      );
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      message.error(tt('كلمتا المرور غير متطابقتين.', 'The passwords do not match.'));
+      return;
+    }
+    setPasswordBusy(true);
+    try {
+      await apiSend('/api/auth/change-password', 'POST', {
+        current_password: currentPassword,
+        new_password: newPassword,
+      });
+      message.success(tt('تم تحديث كلمة المرور.', 'Password updated.'));
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+    } catch (err) {
+      const desc = describeError(err);
+      message.error(desc.message);
+    } finally {
+      setPasswordBusy(false);
+    }
+  }
 
   const load = useCallback(() => {
     setLoading(true);
@@ -161,6 +196,43 @@ export default function SettingsPage() {
             </Typography.Text>
           </>
         ) : null}
+      </Card>
+
+      <Card title={tt('كلمة المرور', 'Password')} style={{ marginBlockStart: 16 }}>
+        <Form layout="vertical" onFinish={() => void changePassword()}>
+          <Form.Item label={tt('كلمة المرور الحالية', 'Current password')}>
+            <Input.Password
+              dir="ltr"
+              autoComplete="current-password"
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+            />
+          </Form.Item>
+          <Form.Item label={tt('كلمة المرور الجديدة', 'New password')}>
+            <Input.Password
+              dir="ltr"
+              autoComplete="new-password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+            />
+          </Form.Item>
+          <Form.Item label={tt('تأكيد كلمة المرور الجديدة', 'Confirm new password')}>
+            <Input.Password
+              dir="ltr"
+              autoComplete="new-password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+            />
+          </Form.Item>
+          <Button
+            type="primary"
+            htmlType="submit"
+            loading={passwordBusy}
+            disabled={!currentPassword || !newPassword || !confirmPassword}
+          >
+            {tt('حفظ', 'Save')}
+          </Button>
+        </Form>
       </Card>
     </div>
   );
