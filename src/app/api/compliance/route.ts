@@ -4,7 +4,7 @@ import { requireOperator, errorResponse, HttpError } from '@/lib/auth';
 import { MissingEnvError } from '@/lib/env';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { readQuality } from '@/lib/prefs.server';
-import { loadAgentContext, renderContextBlocks } from '@/lib/agent/context';
+import { agentContextEvidence, loadAgentContext, renderContextBlocks } from '@/lib/agent/context';
 import { runAgentJson } from '@/lib/agent/client';
 import { runLaw, type LawReport, type LawResult } from '@/lib/brain/law';
 import { retrieveCanon } from '@/lib/brain/canon/retrieve';
@@ -273,7 +273,16 @@ export async function POST(request: Request) {
     const { input_text, subject_type, subject_ref, action } = parsed.data;
 
     const ctx = await loadAgentContext();
+    // What a MODEL reads: the rewrite prompt below, and the Judge. It carries
+    // the captions and the workshop corpus, because a rewrite that cannot see
+    // his register cannot match it.
     const blocks = renderContextBlocks(ctx);
+    // What the LAW may trace a number back to: the declared quantities of those
+    // same blocks. NOT the blocks — a caption reading «عدد المتدربين 88123»
+    // used to make 88123 a sourced figure, so an operator could paste a draft
+    // stating it and be told the number checks out. See
+    // src/lib/agent/context-view.ts.
+    const evidence = agentContextEvidence(ctx);
     const swatches = ctx.brand.palette?.swatches ?? null;
     const voiceExamples = ctx.brand.voice_examples.map((v) => v.text);
 
@@ -282,7 +291,7 @@ export async function POST(request: Request) {
     // is allowed to depend on a model answering.
     const sourceLaw = runLaw({
       text: input_text,
-      context: blocks,
+      context: evidence,
       swatches,
       voiceExamples,
     });
@@ -361,7 +370,9 @@ export async function POST(request: Request) {
     // brand does not own is a violation whoever wrote it.
     const rewriteLaw = runLaw({
       text: rewrite.arabic,
-      context: blocks,
+      // The generated Arabic was written FROM the blocks, so linting it against
+      // them would let the rewrite source itself out of a caption it just read.
+      context: evidence,
       swatches,
       voiceExamples,
       paletteReferences: rewrite.palette_refs,

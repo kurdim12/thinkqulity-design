@@ -163,6 +163,7 @@ const {
   daysBetweenIso,
   formatDelta,
   renderStrategistBlocks,
+  strategistEvidence,
 } = await import('../src/lib/agent/strategist/blocks.ts');
 
 type StrategistData = Awaited<
@@ -171,6 +172,7 @@ type StrategistData = Awaited<
 
 const { STRATEGIST_SYSTEM } = await import('../src/lib/agent/strategist/system.ts');
 const { runLaw } = await import('../src/lib/brain/law/index.ts');
+const { claimsLinter } = await import('../src/lib/brain/law/claims-linter.ts');
 const { MAX_POSTS_SCAN, scanCoverage } = await import('../src/lib/audience/posts.ts');
 
 const strategist = await import('../src/lib/agent/features/strategist.ts');
@@ -345,7 +347,11 @@ function lawOf(payload: StrategistResponse, data: StrategistData): LawReport {
   const blocks = renderStrategistBlocks(data);
   return runLaw({
     text: strategistToText(payload),
-    context: blocks,
+    // The DECLARED VALUES of those blocks, exactly as production passes them —
+    // not the rendered prose. A probe graded against the rendering would be
+    // graded against a more permissive pool than the one that ships, and would
+    // certify as shippable a payload the real gate rejects.
+    context: strategistEvidence(data),
     swatches: data.brand?.palette?.swatches ?? null,
     sourceKeys: { claims: strategistClaims(payload), emitted: collectSourceKeys(data), blocks },
   });
@@ -743,6 +749,31 @@ test('probe 2 · gate — a due decision left unverdicted does not ship; the cor
   assert.equal(corrected.ledger_review[0].verdict, 'refuted');
   assert.deepEqual(lawOf(corrected, data).violations, []);
   assert.equal(rejects(correctionLeadsPayload(), data), false);
+});
+
+test('probe 2 · gate — no identifier is flattened into the text the Law scans', () => {
+  const payload = parsed(correctionLeadsPayload());
+  const text = strategistToText(payload);
+
+  // The payload really does verdict that decision — the id is enforced by
+  // `ledgerReviewCheck`, which reads the PAYLOAD, so nothing is weakened by
+  // keeping it out of the prose.
+  assert.equal(payload.ledger_review[0].decision_id, REFUTED_ID);
+  assert.equal(text.includes(REFUTED_ID), false, 'a uuid reached the linted text');
+
+  // WHY IT MATTERS: a uuid's groups are five bounded quantities that clear the
+  // claim floor, so flattening one makes the Law demand a measurement for
+  // digits nobody asserted. It passed before only because the RENDERED blocks
+  // were the lint context and carried the same id — the id sourced itself.
+  for (const group of REFUTED_ID.split('-')) {
+    if (group.length >= 3) {
+      assert.equal(
+        claimsLinter(`العدد ${group}.`, strategistEvidence(refutedData())).passed,
+        false,
+        `${group} is a claim the evidence cannot source — it must not be in the text`,
+      );
+    }
+  }
 });
 
 test('probe 2 · gate — ordering is the only difference in the pair, and nothing on disk sees it', () => {

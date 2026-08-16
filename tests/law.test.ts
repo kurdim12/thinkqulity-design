@@ -16,7 +16,7 @@ import {
  * does: `contextQuantities` is the MECHANISM behind the claims-linter's new
  * boundary rules, not part of the Law's public surface, and asserting the token
  * set directly says what the rules are instead of inferring them from a verdict. */
-import { contextQuantities } from '../src/lib/brain/law/claims-linter.ts';
+import { claimQuantities, contextQuantities } from '../src/lib/brain/law/claims-linter.ts';
 
 /* ------------------------------------------------------------- fixtures -- */
 
@@ -330,6 +330,69 @@ test('EXPLOIT 4 — no numeral script is invisible to the claim extractor', () =
   // context that really does state the figure still sources it.
   assert.equal(claimsLinter('عدد المتدربين ８８１２３ متدرب.', 'trainees = 88123').passed, true);
   assert.equal(claimsLinter('عدد المتدربين ८८१२३ متدرب.', 'trainees = 88123').passed, true);
+});
+
+/* ------------------------------------------------ a colour is not a count -- */
+
+/*
+ * `#181818` is a colour the brand owns, and `181818` is six digits that clear
+ * the claim floor. The linter used to demand a numeric source for them, and got
+ * one only because the palette was being dumped into the lint context as prose
+ * — so the moment the five feature surfaces started linting against DECLARED
+ * VALUES (src/lib/agent/context-view.ts), every brand guideline naming an
+ * all-numeric swatch failed the Law. The chat path, hardened a round earlier,
+ * already carried the fault unnoticed.
+ *
+ * The exemption is narrow and `paletteClaims` is what makes it safe: it runs on
+ * every `runLaw` call with no condition in front of it, so a hex-shaped token
+ * either expands to a real swatch or is a violation. The probes below are the
+ * ways someone would try to wear the costume without owning the colour.
+ */
+
+/** Two real swatches whose digits are a claim; two that are not all-numeric. */
+const NUMERIC_SWATCHES = { ink: '#181818', charcoal: '#303030' };
+
+test('a hex colour literal is not a metric claim', () => {
+  // Against an EMPTY context: nothing sources 181818, and nothing needs to.
+  assert.equal(claimsLinter('الأسود المعتمد #181818 والرمادي #303030.', '').passed, true);
+  assert.equal(claimQuantities('اللون #181818.').length, 0);
+});
+
+test('the colour exemption does not launder a number', () => {
+  // Five digits is not a hex literal, so it is still a claim.
+  assert.equal(claimsLinter('العدد #88123.', '').passed, false);
+  // Seven is not either — the literal cannot end mid-run.
+  assert.equal(claimsLinter('العدد #1818188.', '').passed, false);
+  // A quantity that starts inside the literal and runs past it is not contained.
+  assert.equal(claimsLinter('القيمة #181818.5 هنا.', '').passed, false);
+  // No `#`, no exemption.
+  assert.equal(claimsLinter('العدد 181818.', '').passed, false);
+  // Marked and adjacent keep their absolute force.
+  assert.equal(claimsLinter('نما #181818% هذا العام.', '').passed, false);
+  assert.equal(claimsLinter('العدد #181818 88123 متدرب.', '').passed, false);
+});
+
+test('a hex that is not a brand colour is still stopped — by the check that owns it', () => {
+  // THE WHOLE SAFETY ARGUMENT, executed: the claims-linter lets `#881234`
+  // through and paletteClaims fails it, so the number never rides out on a
+  // colour it does not own.
+  assert.equal(claimsLinter('اللون #881234.', '').passed, true);
+  const palette = paletteClaims('اللون #881234.', NUMERIC_SWATCHES);
+  assert.equal(palette.passed, false);
+  assert.equal(palette.severity, 'violation');
+  // And a real one passes both.
+  assert.equal(paletteClaims('اللون #181818.', NUMERIC_SWATCHES).passed, true);
+});
+
+test('with no palette recorded, every hex is a violation anyway', () => {
+  assert.equal(paletteClaims('اللون #181818.', null).passed, false);
+});
+
+test('runLaw as a whole: a real swatch passes, an invented one does not', () => {
+  const owned = runLaw({ text: 'الأسود #181818.', context: '', swatches: NUMERIC_SWATCHES });
+  assert.equal(owned.passed, true);
+  const invented = runLaw({ text: 'الأسود #881234.', context: '', swatches: NUMERIC_SWATCHES });
+  assert.equal(invented.passed, false);
 });
 
 /* --------------------------------------------------------- register-score -- */

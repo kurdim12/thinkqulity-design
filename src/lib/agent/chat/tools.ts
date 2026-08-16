@@ -115,11 +115,12 @@ import { HttpError } from '@/lib/auth';
 import { MissingEnvError } from '@/lib/env';
 import type { Quality } from '@/lib/prefs';
 import { distinctPosts, scanCoverage, MAX_POSTS_SCAN } from '@/lib/audience/posts';
-import { loadAgentContext, renderContextBlocks } from '@/lib/agent/context';
+import { agentContextEvidence, loadAgentContext, renderContextBlocks } from '@/lib/agent/context';
 import { runLaw, type LawReport } from '@/lib/brain/law';
 import { retrieveCanon, type CanonHit } from '@/lib/brain/canon/retrieve';
 import { reconcile, runJudge, type JudgeVerdict } from '@/lib/brain/judge';
 import { CapUnavailableError } from '@/lib/mcp/tools';
+import { EXTERNAL_FACTS_KIND } from '@/lib/chat/transcript';
 import {
   CHAT_DISPATCHABLE,
   CHAT_DISPATCH_TOOL,
@@ -164,9 +165,24 @@ export type JudgeRunner = (input: {
   task: string;
 }) => Promise<{ verdict: JudgeVerdict; model: string }>;
 
-/** The brand context the Law reads: the blocks, the palette, the real voice. */
+/**
+ * The brand context: the palette, the real voice, and the blocks in TWO VIEWS
+ * — the same split `ChatToolResult` keeps between `content` and `sourced` in
+ * ./run.ts, applied to the context instead of to a tool result.
+ *
+ * `blocks` is fed to a MODEL — the Judge — and it carries the captions, the
+ * model-written hooks and the workshop corpus, because a ruling about register
+ * cannot be made without them.
+ *
+ * `evidence` is the only thing the LAW may trace a number back to: the declared
+ * quantities of those same blocks, one per line. `blocks` used to be passed as
+ * `runLaw`'s `context` here, which meant a figure the client typed into a
+ * caption — or one a model wrote into a `hook_ar` on an earlier turn — was a
+ * valid source for a compliance verdict on this one.
+ */
 export interface BrandContext {
   blocks: string;
+  evidence: string;
   swatches: Record<string, string> | null;
   voiceExamples: string[];
 }
@@ -202,6 +218,7 @@ const defaultBrandContext: BrandContextLoader = async () => {
   const ctx = await loadAgentContext();
   return {
     blocks: renderContextBlocks(ctx),
+    evidence: agentContextEvidence(ctx),
     swatches: ctx.brand.palette?.swatches ?? null,
     voiceExamples: ctx.brand.voice_examples.map((example) => example.text),
   };
@@ -648,7 +665,8 @@ async function review(
   const context = await loadContext();
   const law = runLaw({
     text: args.text,
-    context: context.blocks,
+    // `evidence`, never `blocks` — see BrandContext.
+    context: context.evidence,
     swatches: context.swatches,
     voiceExamples: context.voiceExamples,
   });
@@ -1335,7 +1353,10 @@ const runComplianceTool: ChatTool = {
       const context = await loadContext();
       const law = runLaw({
         text,
-        context: context.blocks,
+        // `evidence`, never `blocks` — see BrandContext. The cap refused the
+        // Judge, not the standard: the deterministic half runs on exactly the
+        // same evidence it would have had.
+        context: context.evidence,
         swatches: context.swatches,
         voiceExamples: context.voiceExamples,
       });
@@ -1636,6 +1657,134 @@ async function runDispatchTool(
     },
   });
 }
+
+/* ============================================== 6. get_external_facts (SPEC) =
+ *
+ * ===========================================================================
+ * THE WEB TOOL THAT CANNOT REACH THE WEB
+ * ===========================================================================
+ * Hard rule 22 says every external fetch is operator-triggered or explicitly
+ * scheduled, ledgered, and counted against a cap, and that no tool may fetch on
+ * its own initiative mid-sentence. A chat tool is invoked BY A MODEL, MID
+ * SENTENCE, BY DEFINITION. So there is no shape of "let the agent search the
+ * web" that satisfies rule 22, and the way to give the surface external
+ * knowledge is not to weaken the rule — it is to split the two acts:
+ *
+ *   RETRIEVING  is an operator's act. It spends, so it reserves against the
+ *               0008 ledger first, and it lives on its own surface.
+ *   READING     is what this tool does. Nothing it can be handed causes a
+ *               request to leave the Worker.
+ *
+ * That split is why THIS SPEC TAKES NO TARGET. No url, no host, no domain, no
+ * search string — the same structural refusal `search_posts` and
+ * `dispatch_feature` make (see mechanism 3 in the header), for the same reason:
+ * a caller picks a filter and fills in bounded scalars, and cannot point the
+ * studio at anything. `topic` selects among rows ALREADY IN the table; a topic
+ * that matches nothing returns an absence, never a lookup.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT THE RESULT MAY AND MAY NOT DECLARE
+ * ---------------------------------------------------------------------------
+ * `sourced` IS ALWAYS EMPTY, whatever this tool returns, and that is rule 21
+ * expressed in the one field the claims-linter reads. A number inside a
+ * published claim must not become quotable merely because the studio read the
+ * page it sat on. Combined with rule 20 — the model may not type a quantity, and
+ * `buildValueMap()` only holds source keys — an external number is structurally
+ * incapable of reaching a deliverable: it cannot be substituted (no key) and it
+ * cannot be typed (no digits allowed).
+ *
+ * The payload therefore renders as a CARD, not as prose the model paraphrases.
+ * `kind: EXTERNAL_FACTS_KIND` is what the chat screen keys on, imported from the
+ * leaf module the screen imports too, so there is no mirrored string here.
+ *
+ * ---------------------------------------------------------------------------
+ * WIRING — DELIBERATELY NOT DONE HERE
+ * ---------------------------------------------------------------------------
+ * This module publishes the SPEC. It is not in `CHAT_TOOL_NAMES` below, so it is
+ * not reachable from the running app and no model can call it yet. Wiring it
+ * needs a `run` that reads `external_facts` through the caller's own client, and
+ * that executor is not this task's to write. Adding the name without the handler
+ * would not compile — `TOOLS` is total over the tuple — which is the registry
+ * shape doing its job: a tool cannot be half-added.
+ * ========================================================================== */
+
+const EXTERNAL_TOPIC_MAX = 120;
+const EXTERNAL_LIMIT_MAX = 20;
+
+export const getExternalFactsInput = z
+  .object({
+    topic: z.string().min(1).max(EXTERNAL_TOPIC_MAX).optional(),
+    about_client: z.boolean().optional(),
+    limit: z.number().int().min(1).max(EXTERNAL_LIMIT_MAX).optional(),
+  })
+  .strict();
+
+const GET_EXTERNAL_FACTS_DESCRIPTION = `Read claims that HAVE ALREADY BEEN RETRIEVED from the open web and filed, word for word, with the address they were published at and the moment they were read.
+
+THIS TOOL CANNOT FETCH ANYTHING. It reads rows. Calling it never causes a request to leave this system, never costs money, and never counts against any cap. Retrieval is an operator's act on its own surface: if the answer is not already filed, the answer is that nobody has looked, and you should say so.
+
+WHAT COMES BACK IS NOT A MEASUREMENT, AND YOU MAY NOT TREAT IT AS ONE.
+Every row is a sentence somebody else published. It carries a source_url and a retrieved_at. It carries NO source key, and it never will — the table has no such column. Under the substitution contract you may only state a quantity by writing a placeholder that names a source key, so:
+
+  • You may NOT state any figure that appears in these claims. Not in Arabic-Indic digits, not in words, not rounded, not "about", not "reportedly". There is no placeholder that resolves to it, so there is no way to write it.
+  • You MAY say that a named source published something, and name the source and the date it was read. Say it as a claim: "the directory at <host> published a follower figure on <date>". Never as a fact about these accounts.
+  • Where a row is marked about_client, this system MEASURES that thing itself. A page disagreeing with our own measurement is at best stale and at worst about somebody else. Say that the two disagree; do not average them, and do not prefer the page.
+
+An empty result means nothing has been retrieved for that topic. That is an answer — "we have not looked" — and it is different from "the web says nothing". Say which one you mean.`;
+
+/**
+ * The tool as the provider publishes it. Kept next to the description so a
+ * reviewer reads the contract and the schema as one thing.
+ */
+export function externalFactsToolSpec(): ChatToolSpec {
+  return {
+    name: 'get_external_facts',
+    description: GET_EXTERNAL_FACTS_DESCRIPTION,
+    parameters: {
+      type: 'object',
+      properties: {
+        topic: {
+          type: 'string',
+          description:
+            'Filter to claims filed under this topic. Matches rows that already exist; it is not a search query and it reaches nothing outside this database.',
+        },
+        about_client: {
+          type: 'boolean',
+          description:
+            "Only claims flagged as being about one of the client's own accounts. These are the rows most likely to be misread, and the ones this system measures for itself.",
+        },
+        limit: {
+          type: 'integer',
+          description: `How many claims to return, 1 to ${EXTERNAL_LIMIT_MAX}.`,
+        },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  };
+}
+
+/**
+ * The payload shape the executor must return, stated once, here, because the
+ * chat screen renders against it.
+ *
+ *   {
+ *     tool: 'get_external_facts',
+ *     kind: EXTERNAL_FACTS_KIND,
+ *     facts: ExternalFactRow-shaped objects, WITHOUT source_key,
+ *     retrieval?: { url, final_url, trigger, triggered_by, status, requested_at },
+ *     notes?: string[]
+ *   }
+ *
+ * and `sourced: []`, always. The screen refuses at the last mile anything that
+ * arrives carrying a source key, is not https, or has no retrieval instant —
+ * see `readExternalClaims` in src/lib/chat/transcript.ts.
+ *
+ * Re-exported, following this file's own idiom for `CHAT_DISPATCHABLE`, so the
+ * executor has ONE import for the whole surface — and so the marker stays one
+ * symbol with one definition rather than a string spelled twice.
+ */
+export { EXTERNAL_FACTS_KIND };
 
 /* ================================================== the closed allow-list ====
  *

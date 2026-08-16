@@ -79,6 +79,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { wholeQuantity } from '../../brain/law/claims-linter.ts';
+import { isSourceKey } from '../../brain/substitute.ts';
 import {
   distinctPosts,
   scanCoverage,
@@ -1246,6 +1247,134 @@ export function measureEvidence(measures: readonly Measure[]): string[] {
  */
 export function strategistEvidence(data: StrategistData): string {
   return measureEvidence(collectMeasures(data)).join('\n');
+}
+
+/* ============================================ what the code writes for the model */
+
+/**
+ * ===========================================================================
+ * THE THIRD VIEW OF THE SAME BLOCK LIST — THE VALUE MAP (hard rule 20)
+ * ===========================================================================
+ *
+ * `renderStrategistBlocks()` is PROSE FOR THE MODEL. `strategistEvidence()` is
+ * EVIDENCE FOR THE LINTER. This is VALUES FOR THE SUBSTITUTION ENGINE, and all
+ * three are built from `buildStrategistBlocks()` — one assembler, read three
+ * times, never a fork. That matters more here than it did for the other two: a
+ * value map assembled from a different walk of the data would substitute a number
+ * the agent was never shown, under a key it never saw, and the operator would
+ * have no way to tell.
+ *
+ * WHAT THE MODEL DOES WITH IT. It writes `{{performance.personal.avg_engagement}}`
+ * and `substitute()` (src/lib/brain/substitute.ts) puts `508` there. The model
+ * never types the digits, so it cannot mistype them, cannot glue a unit to them,
+ * and cannot spell them in a script that defeats a detector. See that file's
+ * header for why text-matching numbers was abandoned as the guarantee.
+ *
+ * ---------------------------------------------------------------------------
+ * AN ABSENCE IS STILL NOT A KEY
+ * ---------------------------------------------------------------------------
+ * This map is built from `measures`, exactly like `collectSourceKeys()` and
+ * `measureEvidence()`. An `Absence` contributes NOTHING — not an em-dash, not a
+ * blank, not a zero — and the reason is the one at the top of this file: a key
+ * that resolves invites a confident sentence wearing a citation. A placeholder
+ * naming an absence therefore fails to resolve and is reported, which is the
+ * same answer a basis reference to it already gets.
+ *
+ * The em-dash rule (hard rule 2) is unaffected and costs nothing: an em-dash is
+ * not a quantity, so the model may simply type one. What it may not do is get an
+ * em-dash back from a key and have that read as a measurement.
+ *
+ * ---------------------------------------------------------------------------
+ * `n` AND `as_of` ARE REACHABLE, UNDER THE CONVENTION THE TOOLS ALREADY USE
+ * ---------------------------------------------------------------------------
+ * A measure renders as `[key] label (n=190, as_of=2026-08-14) = "508"`, and hard
+ * rule 11 says the sample size travels with the figure — so the agent needs a way
+ * to write it, and `{{key.n}}` is that way. The spelling is not invented here:
+ * `get_stats` already declares `${source_key}.n` and `${source_key}.as_of` in
+ * src/lib/agent/chat/tools.ts, so this is the same convention read from the
+ * blocks instead of from a lookup.
+ *
+ * ---------------------------------------------------------------------------
+ * A KEY THE GRAMMAR CANNOT SPELL IS DROPPED, NOT BENT
+ * ---------------------------------------------------------------------------
+ * `isSourceKey()` is imported from the ENGINE rather than restated, so the keys
+ * offered here are exactly the keys a placeholder can name. One family of real
+ * keys does not survive it: `ledger.decisions.<uuid>.…` carries hyphens, which
+ * `keySegment()` never mints and the grammar refuses. Those measures are
+ * quotations, not quantities — a decision statement, a date, a status — so the
+ * loss is prose the model may type anyway. Bending the grammar to admit them
+ * would widen what a placeholder may contain for no quantity's sake.
+ */
+export interface KeyedValue {
+  /** The source key, as a placeholder would name it. */
+  key: string;
+  /** The value, verbatim, exactly as it will land in the text. */
+  value: string;
+}
+
+/** Every keyed value a measure offers: itself, its sample size, its date. */
+export function measureValues(measures: readonly Measure[]): KeyedValue[] {
+  const entries: KeyedValue[] = [];
+  for (const measure of measures) {
+    entries.push({ key: measure.key, value: measure.value });
+    if (measure.n !== null && measure.n !== undefined) {
+      entries.push({ key: `${measure.key}.n`, value: String(measure.n) });
+    }
+    if (measure.as_of !== null && measure.as_of !== undefined && measure.as_of !== '') {
+      entries.push({ key: `${measure.key}.as_of`, value: measure.as_of });
+    }
+  }
+  return entries;
+}
+
+/**
+ * The map the engine substitutes from. A `Map`, not an object, for the reason
+ * `valueMap()` gives in src/lib/brain/substitute.ts: an object literal would
+ * resolve `{{constructor}}` against `Object.prototype` and substitute a
+ * function's source into a deliverable.
+ *
+ * ONE KEY NAMING TWO VALUES RESOLVES TO NEITHER. `uniqueSegments()` keeps minted
+ * segments distinct within a list, but nothing stops a later source — a tool
+ * declaring a key the blocks also hold — from disagreeing about the value. Last
+ * wins would silently deliver a figure the model did not mean; first wins would
+ * silently deliver a stale one. So a key that is offered two different values is
+ * REMOVED and stays removed, and the placeholder that names it redacts and is
+ * reported. Two sources that disagree about one measurement are a fault, and the
+ * safe reading of a fault is that neither number is deliverable.
+ *
+ * The same value offered twice is not a disagreement and is not a fault: the
+ * blocks and `get_stats` computing `2026-08-14` for the snapshot date is the
+ * ordinary case, not a collision.
+ */
+export function buildValueMap(entries: Iterable<KeyedValue>): Map<string, string> {
+  const values = new Map<string, string>();
+  const contested = new Set<string>();
+
+  for (const entry of entries) {
+    if (contested.has(entry.key)) continue;
+    if (!isSourceKey(entry.key)) continue;
+
+    const held = values.get(entry.key);
+    if (held === undefined) {
+      values.set(entry.key, entry.value);
+      continue;
+    }
+    if (held === entry.value) continue;
+
+    values.delete(entry.key);
+    contested.add(entry.key);
+  }
+
+  return values;
+}
+
+/**
+ * The value map for these blocks. Pure: same data, same map, no clock, no
+ * database, no model — which is what lets the whole substitution gate be
+ * exercised in a repository with no provider key.
+ */
+export function strategistValues(data: StrategistData): Map<string, string> {
+  return buildValueMap(measureValues(collectMeasures(data)));
 }
 
 /* ========================================================================= */

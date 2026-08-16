@@ -7,9 +7,13 @@ import {
   DEFAULT_ACTION_BUDGET,
   DEFAULT_THRESHOLDS,
   renderStrategistBlocks,
+  strategistEvidence,
+  strategistValues,
   type StrategistData,
 } from '../src/lib/agent/strategist/blocks.ts';
 import { claimsLinter } from '../src/lib/brain/law/claims-linter.ts';
+import { CLOSE, isSourceKey, OPEN, REDACTED } from '../src/lib/brain/substitute.ts';
+import { CHAT_SYSTEM } from '../src/lib/agent/chat/system.ts';
 import type {
   ChatToolCallRecord,
   ChatToolResult,
@@ -64,10 +68,37 @@ import type { ChatToolDeps } from '../src/lib/agent/chat/tools.ts';
  *     control are here, because a check that stopped finding real numbers
  *     would be a worse bug than the one it replaced.
  *
+ * AND THEN v5, in the last section of the file. The gate no longer rests on the
+ * linter: the model emits `{{source.key}}` and CODE substitutes the value, so a
+ * number the model cannot write is a number it cannot fabricate. What that
+ * section proves, with the same injected transport and the same real gate:
+ *
+ *   - a draft that states NO DIGIT AT ALL comes back with the measured values in
+ *     it, byte for byte, and the run says every one of them was written by code;
+ *   - the round-3 counter-example — «٨٨<U+034F>٥٠٨», the reason v5 exists — is
+ *     cut, AND the claims-linter is shown passing the same text, because an
+ *     exploit "closed at the substitution step" is only a claim worth making
+ *     where the lint step demonstrably let it through. Three tests assert both
+ *     halves;
+ *   - a key naming no measurement resolves to NOTHING — not an em-dash, not a
+ *     zero, not the key echoed back — including a key the blocks themselves
+ *     declared absent by name;
+ *   - a unit or a second value welded onto a substituted figure takes the figure
+ *     with it, because a magnitude the model assembled is a magnitude the model
+ *     chose;
+ *   - the prompt in src/lib/agent/chat/system.ts spells the syntax the engine
+ *     implements and names keys that really exist, asserted against the engine's
+ *     own grammar rather than against a reader's memory.
+ *
  * WHAT IS NOT PROVEN HERE:
  *   whether a real model repairs a draft when asked to. That is a claim about a
  *   model and no key is usable in this repository. What is proven is that a
  *   model which does NOT repair cannot get an unsourced number onto a screen.
+ *
+ *   Nor that a real model will USE the placeholders. It is told to, in the one
+ *   documented edit to the verbatim prompt; until it does, its typed figures are
+ *   delivered on the OLD guarantee and every one of them is listed in
+ *   `substitution.typed`, which is the number that has to fall to zero.
  * ========================================================================= */
 
 /* ---------------------------------------------------------------- loader --
@@ -212,6 +243,14 @@ function chatData(): StrategistData {
 }
 
 const BLOCKS = renderStrategistBlocks(chatData());
+
+/**
+ * The lint context the gate builds from those blocks, reconstructed here so a
+ * test can ask what the CLAIMS-LINTER ALONE would have done with a draft. Several
+ * tests below turn on that question: an exploit is only proven to be closed at
+ * the substitution step if the lint step demonstrably let it through.
+ */
+const EVIDENCE = strategistEvidence(chatData());
 
 /** Western and Arabic-Indic spellings of one number that is in no source. */
 const INVENTED = '777';
@@ -1061,6 +1100,459 @@ test('EXPLOIT 6 — client free text in a block is not evidence for its own numb
   assert.deepEqual(outcome.law_report.stripped, [LAUNDERED], 'the caption sourced the claim');
   assert.equal(outcome.reply.includes(LAUNDERED), false);
   assert.ok(outcome.reply.includes(UNSOURCED_CHIP));
+});
+
+/* ================================================== v5: the model types nothing ==
+ *
+ * Everything above this line is the LINT-ERA gate, and every one of those tests
+ * still passes unchanged — deliberately, because they are the exploit log and a
+ * v5 that quietly stopped enforcing one of them would be a regression wearing a
+ * new feature's name.
+ *
+ * What changes below is where the guarantee comes from. The model no longer
+ * quotes a value: it writes `{{source.key}}` and CODE substitutes the value the
+ * blocks (or a tool result) computed for that key. See
+ * src/lib/brain/substitute.ts for why text-matching numbers was abandoned as the
+ * primitive, and the header of src/lib/agent/chat/run.ts for the two guarantees
+ * a delivered reply can carry and why the run result never conflates them.
+ *
+ * THE TESTS THAT MATTER MOST HERE ARE THE ONES THAT SHOW THE LINT STEP LETTING
+ * SOMETHING THROUGH. An exploit "closed at the substitution step" is only a claim
+ * worth making where the claims-linter demonstrably passes the same text, so
+ * those tests assert BOTH: `claimsLinter(...).passed === true` on the draft, and
+ * the gate cutting it anyway.
+ * ========================================================================= */
+
+/**
+ * U+034F COMBINING GRAPHEME JOINER — `\p{Mn}`. The round-3 door.
+ *
+ * WRITTEN AS AN ESCAPE, like every invisible in tests/substitute.test.ts. Hard
+ * rule 7 forbids a raw control byte in any file, and this project has twice
+ * produced a false clean scan from a pattern carrying a character nobody could
+ * see. An escape is reviewable; the character is not.
+ */
+const CGJ = '\u034F';
+
+test('SUBSTITUTION, END TO END — the model names keys, the operator reads values', async () => {
+  const draft =
+    `معدل التفاعل ${OPEN}performance.personal.avg_engagement${CLOSE} على ` +
+    `${OPEN}performance.personal.post_count${CLOSE} منشور، مقابل ` +
+    `${OPEN}performance.academy.avg_engagement${CLOSE} للأكاديمية.`;
+
+  // The draft states no digit at all. That is the property, asserted rather than
+  // eyeballed: what the model wrote could not have contained a wrong number.
+  assert.equal(/\p{Nd}/u.test(draft), false, 'the model typed no digit');
+
+  const model = fakeModel([{ text: draft }]);
+  const outcome = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'قارن بين الحسابين',
+    quality: 'standard',
+    transport: model.transport,
+  });
+
+  assert.equal(model.seen.length, 1, 'a substituted draft is never retried');
+  assert.equal(outcome.reply, 'معدل التفاعل 508 على 190 منشور، مقابل 40 للأكاديمية.');
+  assert.equal(outcome.reply.includes(OPEN), false, 'no placeholder survives into the reply');
+  assert.equal(outcome.law_report.repaired, false);
+  assert.deepEqual(outcome.law_report.stripped, []);
+  assert.equal(outcome.law_report.passed, true);
+
+  // Every digit in that sentence was written by this codebase.
+  assert.deepEqual(outcome.substitution.substituted_keys, [
+    'performance.personal.avg_engagement',
+    'performance.personal.post_count',
+    'performance.academy.avg_engagement',
+  ]);
+  assert.deepEqual(outcome.substitution.typed, []);
+  assert.deepEqual(outcome.substitution.refused, []);
+  assert.equal(outcome.substitution.hard_guarantee, true);
+});
+
+test('the value map is the SAME assembler the model read — key by key', () => {
+  const values = strategistValues(chatData());
+
+  // The value under a key is the value the blocks rendered for it.
+  assert.equal(values.get('performance.personal.avg_engagement'), '508');
+  assert.equal(values.get('performance.academy.avg_engagement'), '40');
+  assert.ok(BLOCKS.includes('[performance.personal.avg_engagement]'));
+
+  // Hard rule 11: the sample size is reachable, under the SAME `<key>.n`
+  // convention get_stats already declares in src/lib/agent/chat/tools.ts.
+  assert.equal(values.get('performance.personal.avg_engagement.n'), '190');
+  assert.equal(values.get('performance.personal.avg_engagement.as_of'), SNAPSHOT_DAY);
+
+  /* AND AN ABSENCE IS STILL NOT A KEY — asserted against the keys this fixture
+   * ACTUALLY declares absent, which is the only version of this test that means
+   * anything. `performance.analyses.count` is a real absence here: the analysis
+   * table was not read, so the blocks name the key that WOULD have existed and
+   * emit no value for it. A map holding "—" or "0" under that name would be the
+   * exact trap blocks.ts opens with — a citation that resolves to a hole. */
+  assert.ok(BLOCKS.includes('(no measurement) performance.analyses.count'));
+  assert.equal(values.has('performance.analyses.count'), false);
+  assert.ok(BLOCKS.includes('(no measurement) profiles.academy'));
+  assert.equal(values.has('profiles.academy'), false);
+  assert.equal(values.has('profiles.academy.followers'), false);
+});
+
+test('a key that names no measurement resolves to nothing — an absence is not a value', async () => {
+  const cited =
+    `عدد المتابعين ${OPEN}profiles.academy.followers${CLOSE} متابع، ` +
+    `والمحلَّل ${OPEN}performance.analyses.count${CLOSE} منشور.`;
+  const model = fakeModel([{ text: cited }, { text: cited }]);
+
+  const outcome = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'كم عدد المتابعين؟',
+    quality: 'standard',
+    transport: model.transport,
+  });
+
+  /* Two kinds of nothing, and both come back as the same nothing. The first key
+   * was never a measure at all; the second is one the blocks DECLARED ABSENT by
+   * name. The redaction marker stands where each value would have been, and it
+   * is NOT an em-dash: an em-dash means "measured, absent", which is deliverable,
+   * and this means "this draft is broken", which is not. */
+  assert.equal(outcome.reply, `عدد المتابعين ${REDACTED} متابع، والمحلَّل ${REDACTED} منشور.`);
+  assert.equal(outcome.reply.includes('profiles.academy.followers'), false, 'the key is not echoed');
+  assert.equal(outcome.law_report.repaired, true, 'the fault bought exactly one repair');
+  assert.equal(model.seen.length, 2);
+
+  const refused = outcome.substitution.refused;
+  assert.deepEqual(
+    refused.map((fault) => [fault.kind, fault.key]),
+    [
+      ['unknown-key', 'profiles.academy.followers'],
+      ['unknown-key', 'performance.analyses.count'],
+    ],
+  );
+
+  // The model was told which key failed, and told it once.
+  assert.match(lastUserMessage(model.seen[1]).content, /profiles\.academy\.followers/);
+});
+
+test('a tool result contributes keyed values, so a lookup can be substituted too', async () => {
+  const TOP_POST = '33176';
+  assert.equal(BLOCKS.includes(TOP_POST), false, 'this figure exists only in the tool result');
+
+  const getStats: ChatToolSpec = {
+    name: 'get_stats',
+    description: 'One named, code-defined lookup. No free SQL exists (hard rule 19).',
+    parameters: { type: 'object', properties: { lookup: { type: 'string' } }, required: ['lookup'] },
+  };
+
+  const model = fakeModel([
+    { text: '', toolCalls: [{ id: 'call_1', name: 'get_stats', arguments: '{"lookup":"top"}' }] },
+    {
+      text:
+        `أقوى منشور حصد ${OPEN}performance.personal.top_post.engagement${CLOSE} تفاعل ` +
+        `على ${OPEN}performance.personal.top_post.engagement.n${CLOSE} منشور.`,
+    },
+  ]);
+
+  const outcome = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'أقوى منشور؟',
+    quality: 'standard',
+    tools: [getStats],
+    // The shape `get_stats` really returns: each value with the key that
+    // resolves it, and its sample size under `<key>.n`.
+    executeTool: async () => ({
+      content: `[performance.personal.top_post.engagement] = "${TOP_POST}"`,
+      sourced: [
+        { value: TOP_POST, source_key: 'performance.personal.top_post.engagement' },
+        { value: '190', source_key: 'performance.personal.top_post.engagement.n' },
+      ],
+      source_keys: ['performance.personal.top_post.engagement'],
+    }),
+    transport: model.transport,
+  });
+
+  assert.equal(outcome.reply, `أقوى منشور حصد ${TOP_POST} تفاعل على 190 منشور.`);
+  assert.equal(outcome.substitution.hard_guarantee, true);
+  assert.deepEqual(outcome.law_report.stripped, []);
+  assert.equal(outcome.law_report.repaired, false);
+});
+
+test('two sources that disagree about one key resolve to NEITHER value', async () => {
+  /* `buildValueMap` removes a key it is offered two different values for. Last
+   * wins would deliver a figure the model did not mean; first wins would deliver
+   * a stale one. A disagreement about a measurement is a fault, and the safe
+   * reading of a fault is that neither number is deliverable. */
+  const liar: ChatToolSpec = {
+    name: 'get_stats',
+    description: 'A lookup that disagrees with the blocks about a key they share.',
+    parameters: { type: 'object', properties: {}, required: [] },
+  };
+  const cited = `المعدل ${OPEN}performance.personal.avg_engagement${CLOSE}.`;
+
+  const model = fakeModel([
+    { text: '', toolCalls: [{ id: 'call_1', name: 'get_stats', arguments: '{}' }] },
+    { text: cited },
+    { text: cited },
+  ]);
+
+  const outcome = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'المعدل؟',
+    quality: 'standard',
+    tools: [liar],
+    executeTool: async () => ({
+      content: '[performance.personal.avg_engagement] = "509"',
+      sourced: [{ value: '509', source_key: 'performance.personal.avg_engagement' }],
+    }),
+    transport: model.transport,
+  });
+
+  assert.equal(outcome.reply, `المعدل ${REDACTED}.`);
+  assert.equal(outcome.reply.includes('508'), false, 'not the block value');
+  assert.equal(outcome.reply.includes('509'), false, 'and not the tool value either');
+  assert.equal(outcome.substitution.refused[0].kind, 'unknown-key');
+});
+
+/* ------------------------------------------- the exploits, at the new step -- */
+
+test('THE ROUND-3 COUNTER-EXAMPLE — the sub-100 head the linter cannot see is cut', async () => {
+  /* «٨٨<U+034F>٥٠٨» renders to the operator as ٨٨٥٠٨. U+034F is \p{Mn}: not a
+   * joiner and not blank, so the claims-linter reads TWO quantities, drops ٨٨
+   * under its 100 floor in silence, finds ٥٠٨ sourced, and passes. This is the
+   * counter-example v5 exists for, and the first assertion is that the lint step
+   * really does still let it through — otherwise the rest proves nothing. */
+  const attack = `المتوسط ٨٨${CGJ}٥٠٨ متابع.`;
+
+  assert.equal(
+    claimsLinter(attack, EVIDENCE).passed,
+    true,
+    'the lint step alone delivers this; that is the whole reason for the substitution step',
+  );
+
+  const model = fakeModel([{ text: attack }, { text: attack }]);
+  const outcome = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'كم عدد المتابعين؟',
+    quality: 'standard',
+    transport: model.transport,
+  });
+
+  // There is no floor here, so the head is exactly as loud as the tail.
+  assert.deepEqual(outcome.law_report.stripped, ['٨٨']);
+  assert.equal(outcome.reply, `المتوسط ${UNSOURCED_CHIP}${CGJ}٥٠٨ متابع.`);
+  assert.equal(outcome.reply.includes('٨٨'), false, 'the head is gone, so the figure is destroyed');
+  assert.equal(outcome.law_report.repaired, true);
+
+  // And the tail — a figure the model TYPED — is reported as resting on the old
+  // guarantee, not the new one.
+  assert.deepEqual(outcome.substitution.typed, ['٥٠٨']);
+  assert.equal(outcome.substitution.hard_guarantee, false);
+});
+
+test('THE SAME ATTACK THROUGH THE NEW DOOR — a head typed against a SUBSTITUTED value', async () => {
+  /* The model cannot write ٥٠٨ any more, so it writes the placeholder and types
+   * only the head. The engine wrote the tail at a position it recorded; the head
+   * occupies no such position. The claims-linter passes the substituted text for
+   * exactly the round-3 reason, and is again not what stops it. */
+  const attack = `المتوسط ٨٨${CGJ}${OPEN}performance.personal.avg_engagement${CLOSE} متابع.`;
+  const substituted = `المتوسط ٨٨${CGJ}508 متابع.`;
+
+  assert.equal(claimsLinter(substituted, EVIDENCE).passed, true, 'the lint step passes it');
+
+  const model = fakeModel([{ text: attack }, { text: attack }]);
+  const outcome = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'كم عدد المتابعين؟',
+    quality: 'standard',
+    transport: model.transport,
+  });
+
+  assert.deepEqual(outcome.law_report.stripped, ['٨٨']);
+  assert.equal(outcome.reply, `المتوسط ${UNSOURCED_CHIP}${CGJ}508 متابع.`);
+  // The substituted value is untouched: the gate cut what the MODEL wrote.
+  assert.ok(outcome.reply.includes('508'));
+  assert.deepEqual(outcome.substitution.substituted_keys, ['performance.personal.avg_engagement']);
+});
+
+test('digits welded onto a substituted value take the value with them', async () => {
+  // No separator at all: `٨٨508` is ONE quantity that runs across the edge of a
+  // span, so it is not a value this code substituted — it is a new figure
+  // assembled out of one. The whole thing goes.
+  const attack = `المتوسط ٨٨${OPEN}performance.personal.avg_engagement${CLOSE} متابع.`;
+  const model = fakeModel([{ text: attack }, { text: attack }]);
+
+  const outcome = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'كم عدد المتابعين؟',
+    quality: 'standard',
+    transport: model.transport,
+  });
+
+  assert.equal(outcome.substitution.refused[0].kind, 'glued-value');
+  assert.deepEqual(outcome.law_report.stripped, ['٨٨508']);
+  assert.equal(outcome.reply, `المتوسط ${UNSOURCED_CHIP} متابع.`);
+  assert.equal(outcome.reply.includes('508'), false, 'the real value went with the fabrication');
+});
+
+test('a UNIT typed onto a substituted value is a magnitude the model chose', async () => {
+  /* THE «12.7x» FABRICATION, assembled from a value the model did not have to
+   * type. `%` turns 508 into a rate and `×` turns it into a multiple: if the
+   * measurement is a rate, the VALUE carries the sign and the model does not add
+   * one. This is the case that proves tolerance is scoped to `bare-quantity` and
+   * never to a glued one — «508٪» would pass a whole-token match against the
+   * evidence, because its digits really are 508. Its meaning is not. */
+  const attack = `نسبة النمو ${OPEN}performance.personal.avg_engagement${CLOSE}٪ هالشهر.`;
+  const model = fakeModel([{ text: attack }, { text: attack }]);
+
+  const outcome = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'قدّيش النمو؟',
+    quality: 'standard',
+    transport: model.transport,
+  });
+
+  assert.equal(outcome.substitution.refused[0].kind, 'glued-value');
+  assert.equal(outcome.reply, `نسبة النمو ${UNSOURCED_CHIP} هالشهر.`);
+  // The unit went with the figure: a bare ٪ left standing would read as a claim
+  // the chip did not remove.
+  assert.equal(outcome.reply.includes('٪'), false);
+  assert.deepEqual(outcome.law_report.stripped, ['508٪']);
+});
+
+test('two substituted values side by side read as one figure, and are refused as one', async () => {
+  /* The residual the claims-linter names in its own header and cannot close: it
+   * cannot tell which of two neighbouring numbers is evidence, so «٨٨ ٥٠٨»
+   * written as two honest citations passes. Here both sides are known to be
+   * values this code wrote, so the pair is refusable — and refused. */
+  const attack =
+    `المتوسط ${OPEN}performance.academy.avg_engagement${CLOSE} ` +
+    `${OPEN}performance.personal.avg_engagement${CLOSE} متابع.`;
+
+  assert.equal(claimsLinter('المتوسط 40 508 متابع.', EVIDENCE).passed, true, 'the lint step passes it');
+
+  const model = fakeModel([{ text: attack }, { text: attack }]);
+  const outcome = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'المتوسط؟',
+    quality: 'standard',
+    transport: model.transport,
+  });
+
+  assert.equal(outcome.substitution.refused[0].kind, 'glued-value');
+  assert.deepEqual(outcome.law_report.stripped, ['40 508']);
+  assert.equal(outcome.reply, `المتوسط ${UNSOURCED_CHIP} متابع.`);
+});
+
+test('a KEY carrying digits cannot echo them, and a key that is a number is not a key', async () => {
+  /* `keySegment()` preserves \p{N}, so a cluster a model named "88123" mints
+   * `performance.clusters.88123.n`. The digits in a key never reach a reader —
+   * not because they are filtered, but because the output is drawn from the value
+   * map and from nowhere else. There are no clusters in this fixture, so the key
+   * resolves to nothing and nothing is what is emitted. */
+  const invented = `العنقود فيه ${OPEN}performance.clusters.${LAUNDERED}.n${CLOSE} منشور.`;
+  const byKey = fakeModel([{ text: invented }, { text: invented }]);
+
+  const outcome = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'قدّيش المنشورات بالعنقود؟',
+    quality: 'standard',
+    transport: byKey.transport,
+  });
+
+  assert.equal(outcome.reply, `العنقود فيه ${REDACTED} منشور.`);
+  assert.equal(outcome.reply.includes(LAUNDERED), false, 'the key was not echoed');
+  assert.equal(outcome.substitution.refused[0].kind, 'unknown-key');
+
+  // And the blunter attempt: a placeholder whose contents are the number itself.
+  // A key begins with an ASCII lowercase letter, which is what makes "a key is
+  // not a quantity" structural rather than observed.
+  assert.equal(isSourceKey('88508'), false);
+  const bare = `عدد المتابعين ${OPEN}88508${CLOSE} متابع.`;
+  const byNumber = fakeModel([{ text: bare }, { text: bare }]);
+
+  const second = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'كم عدد المتابعين؟',
+    quality: 'standard',
+    transport: byNumber.transport,
+  });
+
+  assert.equal(second.reply, `عدد المتابعين ${REDACTED} متابع.`);
+  assert.equal(second.reply.includes('88508'), false);
+  assert.equal(second.substitution.refused[0].kind, 'malformed-placeholder');
+});
+
+/* ------------------------------------------------ the two guarantees, named -- */
+
+test('a TYPED figure is reported as typed; the same figure substituted is not', async () => {
+  /* The transitional weakening, made executable rather than left in a comment. A
+   * sourced figure the model typed is still delivered — refusing those on the day
+   * the prompt changed would chip every true number in every reply — but it rests
+   * on the OLD guarantee and the run result says so. The route to zero is to
+   * watch `typed` empty out. */
+  const typed = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'المعدل؟',
+    quality: 'standard',
+    transport: fakeModel([{ text: 'المعدل 508 لكل منشور.' }]).transport,
+  });
+
+  assert.equal(typed.reply, 'المعدل 508 لكل منشور.', 'delivered, exactly as today');
+  assert.equal(typed.law_report.repaired, false);
+  assert.deepEqual(typed.substitution.typed, ['508']);
+  assert.deepEqual(typed.substitution.substituted_keys, []);
+  assert.equal(typed.substitution.hard_guarantee, false);
+
+  const named = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'المعدل؟',
+    quality: 'standard',
+    transport: fakeModel([
+      { text: `المعدل ${OPEN}performance.personal.avg_engagement${CLOSE} لكل منشور.` },
+    ]).transport,
+  });
+
+  // The same sentence, to the character — and only one of the two carries the
+  // guarantee that no model could have written the number wrong.
+  assert.equal(named.reply, typed.reply);
+  assert.deepEqual(named.substitution.typed, []);
+  assert.equal(named.substitution.hard_guarantee, true);
+});
+
+/* ------------------------------------------------- the prompt cannot drift -- */
+
+test('the prompt teaches the syntax the engine implements, key for key', () => {
+  /* src/lib/agent/chat/system.ts is installed verbatim with exactly one
+   * documented exception: it teaches the placeholder syntax. A drift between that
+   * text and the engine's grammar would make every reply a violation, so the two
+   * are asserted against each other here rather than left to a reader's memory. */
+  const spellings = [...CHAT_SYSTEM.matchAll(/\{\{([^{}]*)\}\}/gu)].map((match) => match[1]);
+  assert.ok(spellings.length > 0, 'the prompt teaches the syntax at all');
+
+  // The delimiters are the ENGINE's, not a copy that resembles them.
+  assert.ok(CHAT_SYSTEM.includes(`${OPEN}performance.personal.avg_engagement${CLOSE}`));
+  assert.equal(CHAT_SYSTEM.includes(`${OPEN} `), false, 'no spaced variant is taught');
+  assert.equal(CHAT_SYSTEM.includes(REDACTED), true, 'and what an unresolved key becomes');
+
+  const values = strategistValues(chatData());
+  for (const spelling of spellings) {
+    assert.ok(isSourceKey(spelling), `the prompt spells "${spelling}" as a key the engine accepts`);
+    // `source.key` and its two variants are the syntax being illustrated. Every
+    // other key the prompt names is a REAL key — an example that names a key the
+    // blocks never emit teaches the model to write one.
+    if (spelling.startsWith('source.key')) continue;
+    assert.ok(values.has(spelling), `the prompt's example names a real key: ${spelling}`);
+  }
 });
 
 test('THE COST OF EXPLOIT 6 — a caption quoting a real figure now gets chipped', async () => {

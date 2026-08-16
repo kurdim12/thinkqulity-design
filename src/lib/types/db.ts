@@ -758,3 +758,144 @@ export interface ChatMessageRow {
   est_usd: number | null;
   created_at: string;
 }
+
+/* ===========================================================================
+ * 0008_external_facts — EXTERNAL KNOWLEDGE. Hard rules 21 and 22.
+ *
+ * Two things live here and they must never be confused with each other, which
+ * is why they are declared side by side with the difference visible:
+ *
+ *   A MEASURE is a value THIS CODEBASE COMPUTED. It has a `source_key`
+ *   (`BasisRef` above), and a source_key is the only thing
+ *   src/lib/brain/substitute.ts will ever substitute into a deliverable.
+ *
+ *   AN EXTERNAL FACT is a sentence somebody else published. It has a
+ *   `source_url` and a `retrieved_at`, and it has NO source_key — `ExternalFactRow`
+ *   declares `source_key?: never` so that a row carrying one is not assignable
+ *   to it and so that the row is not assignable to `BasisRef`. Rule 21 is that
+ *   type line, and the migration's answering fact is that the table has no such
+ *   column.
+ *
+ * The consequence is worth stating because it is the whole point: a figure with
+ * no source_key cannot be placed by the substitution engine, and under rule 20
+ * the model may not type one. SO AN EXTERNAL NUMBER CANNOT REACH A DELIVERABLE
+ * AT ALL. See src/lib/web/facts.ts for the argument in full.
+ * ========================================================================= */
+
+/**
+ * Rule 22 in a union: a fetch is triggered by a person or by a named schedule.
+ * There is no 'agent' member, and `web_retrievals.trigger` carries the same
+ * CHECK, so a fetch on a model's own initiative is not a row that can exist.
+ */
+export type WebRetrievalTrigger = 'operator' | 'schedule';
+
+/**
+ * `reserved` — open, the attempt is in flight.
+ * `ok`       — a response was received (whatever its status line said).
+ * `refused`  — the guard refused it and NO REQUEST WENT OUT. A refusal carries
+ *              no http_status, no final_url and no bytes; the database enforces
+ *              that, because a refusal that reached something means the guard
+ *              ran after the request.
+ * `failed`   — a request went out and did not complete.
+ */
+export type WebRetrievalStatus = 'reserved' | 'ok' | 'refused' | 'failed';
+
+/** One Amman day's external-fetch counter. Monotone: nothing is ever released. */
+export interface WebFetchDayRow {
+  /** ISO date, `YYYY-MM-DD`. Always supplied by the app, never by now(). */
+  amman_day: string;
+  reserved_fetches: number;
+  updated_at: string;
+}
+
+/**
+ * ONE FETCH ATTEMPT, ledgered before the request went out.
+ *
+ * `estimated_usd` is null when no verified per-query rate exists for the
+ * provider — null means "not estimated", never "free", exactly as on
+ * `ScrapeRunRow`. Rule 15 makes a null block before this row is ever written.
+ */
+export interface WebRetrievalRow {
+  id: string;
+  amman_day: string;
+  /** The URL AS REQUESTED, verbatim. Not normalised: what was asked is the audit. */
+  url: string;
+  /** The parsed, lowercased host. Denormalised so a per-host pattern is one scan. */
+  host: string;
+  /** Where the redirect chain actually ended. Null on a refusal: nowhere was reached. */
+  final_url: string | null;
+  trigger: WebRetrievalTrigger;
+  /** The operator's email, or the schedule's name. "Operator-triggered" is not a boolean. */
+  triggered_by: string;
+  estimated_usd: number | null;
+  status: WebRetrievalStatus;
+  http_status: number | null;
+  /** Bytes actually read, capped. Null when nothing was read. */
+  bytes: number | null;
+  note: string | null;
+  requested_at: string;
+  /** Set exactly when `status` is not 'reserved'. The pairing is a CHECK. */
+  settled_at: string | null;
+}
+
+/** What class of claim this is. A statistic invites being misread; a definition does not. */
+export type ExternalFactKind = 'statistic' | 'statement' | 'definition' | 'event' | 'listing';
+
+/**
+ * How well corroborated a claim is — AND THERE IS NO VALUE MEANING TRUE.
+ *
+ * That absence is rule 21 in one union. No amount of corroboration promotes a
+ * published claim into a measurement: two sources saying the same thing are two
+ * claims. 'contradicted' means THIS SYSTEM'S OWN measurement disagrees, which is
+ * the most useful row the table can hold.
+ */
+export type ExternalConfidence = 'unverified' | 'corroborated' | 'contradicted';
+
+/** The five things this system measures for itself, so no web page may measure them for it. */
+export type ClientMeasure =
+  | 'followers'
+  | 'following'
+  | 'post_count'
+  | 'engagement'
+  | 'verification';
+
+/**
+ * ONE CLAIM SOMEBODY PUBLISHED, filed as one.
+ *
+ * `source_key?: never` is the load-bearing line. It makes an object carrying a
+ * `source_key` unassignable to this type, and makes this type unassignable to
+ * `BasisRef` — so an external claim can be handed to nothing that takes
+ * evidence, including `CitedClaim.basis` in the Law layer. The compile-time
+ * assertions that hold both directions in place live in src/lib/web/facts.ts.
+ *
+ * `about_client` is set by a ONE-WAY RATCHET: a caller may raise it and no
+ * caller can lower it, because a detector that can only escalate fails toward a
+ * missing label rather than toward a missing guarantee.
+ */
+export interface ExternalFactRow {
+  id: string;
+  /** The ledger row this came out of. NOT NULL, and a foreign key: no fetch, no fact. */
+  retrieval_id: string;
+  /** THE CLAIM VERBATIM AS PUBLISHED. Never summarised, rounded or translated. */
+  claim: string;
+  /** Rule 21: an external fact carries its URL. https, by constraint. */
+  source_url: string;
+  /** The page's own title. Null means the page carried none — a fact, not an unknown. */
+  page_title: string | null;
+  /** Rule 21: an external fact carries its retrieval date. */
+  retrieved_at: string;
+  topic: string;
+  kind: ExternalFactKind;
+  confidence: ExternalConfidence;
+  about_client: boolean;
+  /** Which account, when `about_client`. Null otherwise; the pairing is a CHECK. */
+  client_account: Account | null;
+  /** Which measure the claim purports to be. Null when it purports to be none. */
+  client_measure: ClientMeasure | null;
+  created_at: string;
+  /**
+   * STRUCTURAL REFUSAL. Not a field — the absence of one, spelled so the
+   * compiler enforces it. An external fact has no source key, ever.
+   */
+  source_key?: never;
+}

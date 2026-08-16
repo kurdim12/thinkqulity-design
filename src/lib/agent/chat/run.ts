@@ -5,15 +5,29 @@ import type { Quality } from '@/lib/prefs';
 import { claimsLinter, fail, type LawResult } from '@/lib/brain/law';
 // Imported from the module rather than the barrel: these are the MECHANISM the
 // claims-linter is built from, not part of the Law's public verdict surface.
-import { claimQuantities, wholeQuantity } from '@/lib/brain/law/claims-linter';
+import {
+  claimQuantities,
+  contextQuantities,
+  quantities,
+  wholeQuantity,
+} from '@/lib/brain/law/claims-linter';
+import {
+  substitute,
+  type SubstitutionViolation,
+  type ViolationKind,
+} from '@/lib/brain/substitute';
 import type { ChatLawReportRow, ChatLawResultRow, ChatToolCallRecord } from '@/lib/types/db';
 // Re-exported because anyone writing a `ToolExecutor` needs this shape, and the
 // row type and the runtime type must stay the same type — not two that agree.
 export type { ChatToolCallRecord } from '@/lib/types/db';
 import {
+  buildValueMap,
+  collectMeasures,
   collectSourceKeys,
+  measureValues,
   renderStrategistBlocks,
   strategistEvidence,
+  type KeyedValue,
   type StrategistData,
 } from '../strategist/blocks';
 import { effortFor, modelFor, providerKeyName, resolveProvider, type Provider } from '../provider';
@@ -40,17 +54,51 @@ import { CHAT_SYSTEM } from './system';
  * THE GATE, in order:
  *
  *   1. The model drafts a reply, with tools, over a windowed history.
- *   2. The draft is linted by the REAL claims-linter (src/lib/brain/law) against
- *      the DECLARED VALUES of the strategist blocks AND the DECLARED half of
- *      every tool result this turn produced — `ChatToolResult.sourced`, never
- *      `content`. See that type for the laundering attack the split closes, and
- *      `measureEvidence()` in ../strategist/blocks.ts for why the lint context
- *      is the block VALUES rather than the rendered blocks the model reads.
- *   3. A violation buys exactly ONE repair — the failing numbers are named back
- *      to the model and it drafts again, without tools.
- *   4. A second violation is not argued with. The offending numbers are
+ *   2. THE DRAFT IS SUBSTITUTED (hard rule 20). Every `{{source.key}}` the model
+ *      wrote is replaced by the value THIS CODEBASE computed for that key, taken
+ *      from the value map assembled by ../strategist/blocks.ts and from the
+ *      DECLARED half of the turn's tool results. A number the model cannot write
+ *      is a number it cannot fabricate; see src/lib/brain/substitute.ts for why
+ *      text-matching numbers was abandoned as the guarantee.
+ *   3. The substituted text is linted by the REAL claims-linter
+ *      (src/lib/brain/law) against the DECLARED VALUES of the strategist blocks
+ *      AND the DECLARED half of every tool result this turn produced —
+ *      `ChatToolResult.sourced`, never `content`. See that type for the
+ *      laundering attack the split closes, and `measureEvidence()` in
+ *      ../strategist/blocks.ts for why the lint context is the block VALUES
+ *      rather than the rendered blocks the model reads.
+ *   4. A violation of either kind buys exactly ONE repair — the specific fault is
+ *      named back to the model and it drafts again, without tools.
+ *   5. A second violation is not argued with. The offending numbers are
  *      SURGICALLY REMOVED from the text and replaced, in place, with a visible
  *      «رقم غير موثّق — حُذف» marker, and the law report says which numbers went.
+ *
+ * TWO GUARANTEES, AND THE RUN RESULT NEVER CONFLATES THEM.
+ * A digit in the delivered text got there one of two ways.
+ *
+ *   SUBSTITUTED — code wrote it, at a character position the engine itself
+ *   recorded. That is the hard guarantee of rule 20, and no spelling, script,
+ *   zero-width character or Unicode version can reach around it.
+ *
+ *   TYPED — the model wrote it. It is REFUSED unless the claims-linter can trace
+ *   it to a declared value, which is the OLD, weaker guarantee: a whole-token
+ *   match against the evidence pool. Every one that survives is listed in
+ *   `ChatRunResult.substitution.typed`, and `hard_guarantee` is true exactly when
+ *   that list is empty.
+ *
+ * WHY TYPED IS TOLERATED AT ALL, stated rather than discovered later. Rule 20
+ * says a bare quantity is a violation, and it is — it is fed back, and if the
+ * model will not withdraw it, it is cut. The one exception is a figure the
+ * linter can already source: refusing THOSE on the day the prompt changed would
+ * chip every true number in every reply from a model that has not yet learned
+ * the syntax, and an operator who sees the chip where 508 belongs stops
+ * believing the chip. The honest route to zero typed quantities is to watch
+ * `typed` empty out, not to break the product to reach it in one commit. What is
+ * NOT tolerated, at any magnitude and whatever the evidence says: digits welded
+ * onto a substituted value, two values shoved together, a numeral outside the
+ * decimal classes, and — the round-3 counter-example — the sub-100 head of a
+ * split figure, which the linter's claim floor drops in silence and this engine
+ * has no floor to drop it through.
  *
  * WHY CHAT PROSE SKIPS THE JUDGE — do not "fix" this later.
  * Every other generation path in this app runs Law then Judge then one retry
@@ -275,6 +323,45 @@ export interface HistoryWindow {
   truncated: boolean;
 }
 
+/** One substitution fault, as the report keeps it. Diagnostics, never text. */
+export interface ChatSubstitutionFault {
+  kind: ViolationKind;
+  /** Operator-facing, from the engine. Names what was wrong and why it matters. */
+  evidence: string;
+  /** The offending text, verbatim and truncated. Null when the fault has none. */
+  raw: string | null;
+  /** The key that failed to resolve, for `unknown-key`. Null otherwise. */
+  key: string | null;
+}
+
+/**
+ * WHERE THE DIGITS IN THIS REPLY CAME FROM.
+ *
+ * Kept beside `law_report` rather than inside it because `ChatLawReportRow` is
+ * the STORED shape (src/lib/types/db.ts) and this is a property of the run. What
+ * the row already records — repaired, stripped, every check in order — is
+ * unchanged and still true.
+ */
+export interface ChatSubstitutionReport {
+  /** Source keys whose values CODE wrote into the reply, in the order they landed. */
+  substituted_keys: string[];
+  /**
+   * Quantities the MODEL typed that the claims-linter could source, so they were
+   * delivered. Each one is a figure resting on the old guarantee.
+   */
+  typed: string[];
+  /** Faults refused: named back to the model once, then redacted or cut out. */
+  refused: ChatSubstitutionFault[];
+  /**
+   * True when every digit in the DELIVERED text was written by this codebase.
+   *
+   * Refused quantities never reach the operator — they are cut and chipped — so
+   * the only model-typed digits that can survive are the tolerated ones, and the
+   * guarantee holds exactly when `typed` is empty.
+   */
+  hard_guarantee: boolean;
+}
+
 export interface ChatRunResult {
   /** The delivered text. Linted, and repaired or stripped if it had to be. */
   reply: string;
@@ -282,6 +369,8 @@ export interface ChatRunResult {
   cards: Record<string, unknown>[];
   tools: RecordedTool[];
   law_report: ChatLawReportRow;
+  /** Where the digits came from. See `ChatSubstitutionReport`. */
+  substitution: ChatSubstitutionReport;
   /** Every source_key the blocks emitted this turn — what could be cited. */
   source_keys: string[];
   model: string;
@@ -484,6 +573,117 @@ export function stripUnsourcedNumbers(
   return { text: out, stripped };
 }
 
+/* ==================================================== pure: substitution == */
+
+/**
+ * The keyed values ONE tool result contributes to the map.
+ *
+ * A `SourcedValue` with a `source_key` is a keyed value by construction: the
+ * handler that wrote it declared both halves in the same expression, and
+ * `get_stats` already mints `<key>.n` and `<key>.as_of` under the convention the
+ * blocks use (see `measureValues()` in ../strategist/blocks.ts).
+ *
+ * A DECLARATION WITHOUT A KEY CONTRIBUTES NOTHING HERE, and that is not an
+ * oversight. `search_posts` declares a row's ig_id, likes and posted_at with no
+ * key, because there is no key that resolves "the engagement of the fourth row
+ * of this particular search" — hard rule 12 says an invented key is worse than
+ * none. Those values remain lint evidence, so a model that types one still gets
+ * it through; what they cannot be is the target of a placeholder, because a
+ * placeholder must name something a reader could look up afterwards.
+ */
+export function toolValues(result: ChatToolResult): KeyedValue[] {
+  const entries: KeyedValue[] = [];
+  for (const declared of result.sourced ?? []) {
+    const key = declared.source_key;
+    if (key === undefined) continue;
+    entries.push({ key, value: declared.value });
+  }
+  return entries;
+}
+
+/**
+ * Whether a substitution violation is a quantity the claims-linter could source.
+ *
+ * ONLY `bare-quantity` IS ELIGIBLE. A `glued-value` is digits welded onto a
+ * substituted value, two values shoved together, or a unit the model chose — a
+ * figure ASSEMBLED out of real ones, which is exactly the fabrication that has no
+ * evidence to be traced to however real its parts were. A placeholder fault is
+ * not a quantity at all. See the header for why this tolerance exists and what it
+ * costs.
+ *
+ * The comparison is the linter's own canonical key against the linter's own
+ * evidence set — not a second notion of "the same number".
+ */
+function accountedFor(
+  violation: SubstitutionViolation,
+  sourced: ReadonlySet<string>,
+): boolean {
+  if (violation.kind !== 'bare-quantity') return false;
+  const raw = violation.raw;
+  if (raw === undefined) return false;
+  const key = wholeQuantity(raw);
+  return key !== null && sourced.has(key);
+}
+
+/** A violation as the run result keeps it. Never deliverable text. */
+function toFault(violation: SubstitutionViolation): ChatSubstitutionFault {
+  return {
+    kind: violation.kind,
+    evidence: violation.evidence,
+    raw: violation.raw ?? null,
+    key: violation.key ?? null,
+  };
+}
+
+/**
+ * Cuts refused quantities out of the SUBSTITUTED text and chips them.
+ *
+ * The counterpart of `stripUnsourcedNumbers` for the numbers the linter would
+ * never flag: a sub-100 head, a superscript, digits glued to a real value. It
+ * cuts SPANS THE ENGINE REPORTED rather than re-deciding what a number is, so
+ * what is removed is by construction what was refused.
+ *
+ * TWO THINGS IT TAKES FROM THE ONE TOKENISER RATHER THAN RESTATING. The unit
+ * marker travels with the figure — a bare `٪` left standing reads as a claim the
+ * chip did not remove — and `quantities()` is where a marker's end is known.
+ * Nothing here holds a pattern for digits or for units; the header of
+ * src/lib/brain/law/claims-linter.ts is the list of what a second one costs.
+ *
+ * Only violations located in the FINAL text are cut. A placeholder fault is
+ * located in the DRAFT, where its offsets mean something and where cutting them
+ * out of the final text would slice the wrong characters; the engine has already
+ * put `[?]` where it stood.
+ */
+export function stripSubstitutionViolations(
+  text: string,
+  violations: readonly SubstitutionViolation[],
+): StripOutcome {
+  const spans = violations
+    .filter((violation) => violation.frame === 'final' && violation.end > violation.start)
+    .map((violation) => ({ start: violation.start, end: violation.end }))
+    .sort((left, right) => left.start - right.start || right.end - left.end);
+  if (spans.length === 0) return { text, stripped: [] };
+
+  const markerEnds = new Map<number, number>();
+  for (const quantity of quantities(text)) markerEnds.set(quantity.end, quantity.markerEnd);
+
+  const stripped: string[] = [];
+  let out = '';
+  let cursor = 0;
+  for (const span of spans) {
+    // A span already inside a wider cut — the two-values rule reports the pair
+    // AND each half can report itself — is not cut twice.
+    if (span.start < cursor) continue;
+    const end = Math.max(span.end, markerEnds.get(span.end) ?? span.end);
+    out += text.slice(cursor, span.start) + UNSOURCED_CHIP;
+    stripped.push(text.slice(span.start, end));
+    cursor = end;
+  }
+  out += text.slice(cursor);
+
+  return { text: out, stripped };
+}
+
 /* ============================================================ pure: cost == */
 
 /** Six decimals, not cents: a chat turn can honestly cost less than a cent. */
@@ -516,22 +716,51 @@ function toRow(result: LawResult): ChatLawResultRow {
   };
 }
 
+/** How many faults are quoted back. A repair message is not a lint report. */
+const MAX_REPAIR_FAULTS = 6;
+
 /**
- * The repair instruction, naming what failed.
+ * The repair instruction, naming what failed — the SPECIFIC fault, from the
+ * engine's own evidence, not a restatement of the rule.
  *
  * A subtlety worth stating: this message QUOTES the offending numbers back at
  * the model, and it is a conversation message — it never joins the lint context.
  * The context is the blocks and the tool results, and nothing else, so echoing a
- * bad number here cannot launder it into a sourced one on the next pass.
+ * bad number here cannot launder it into a sourced one on the next pass. The same
+ * holds for a rejected KEY: naming it here tells the model what to fix, and the
+ * key still resolves to nothing.
+ *
+ * Both halves can fire at once — a typed figure that is also unsourced is a
+ * substitution fault AND a lint failure — and both are said, because a model told
+ * only half of what is wrong fixes half of it.
  */
-function repairInstruction(unsourced: readonly string[]): string {
-  const list = unsourced.join(', ');
-  return [
-    `Your draft stated ${unsourced.length} number(s) that appear nowhere in the blocks or the tool results you were given: ${list}.`,
+function repairInstruction(
+  faults: readonly SubstitutionViolation[],
+  unsourced: readonly string[],
+): string {
+  const lines: string[] = [];
+
+  if (faults.length > 0) {
+    lines.push(
+      `Your draft broke the substitution contract in ${faults.length} place(s):`,
+      ...faults.slice(0, MAX_REPAIR_FAULTS).map((fault) => `- ${fault.evidence}`),
+      'Write every quantity about this client as {{source.key}} — two braces, the key exactly as the blocks spell it inside the square brackets, no spaces inside the braces — and the code substitutes the value. Do not type the digits yourself.',
+    );
+  }
+
+  if (unsourced.length > 0) {
+    lines.push(
+      `Your draft stated ${unsourced.length} number(s) that appear nowhere in the blocks or the tool results you were given: ${unsourced.join(', ')}.`,
+    );
+  }
+
+  lines.push(
     'Rewrite the reply now. State only quantities that appear verbatim in the provided context, each with its source key.',
     'Where a figure you wanted does not exist, say which computation is missing and offer to open a request for it. Do not estimate, round, or re-derive it.',
     'Reply with the corrected message only.',
-  ].join('\n');
+  );
+
+  return lines.join('\n');
 }
 
 /* ======================================================= transport: shared = */
@@ -973,20 +1202,54 @@ export async function runAgentChat(args: RunChatArgs): Promise<ChatRunResult> {
   const context = [evidence, ...recorded.map((entry) => lintEvidence(entry.result))]
     .filter((part) => part !== '')
     .join('\n\n');
+
+  /* WHAT THE LINTER CAN TRACE, computed ONCE for the turn.
+   *
+   * The same set `claimsLinter` builds internally, and it is built here for the
+   * one other question that needs it: whether a quantity the model TYPED is one
+   * the linter could source. Asking that per violation would rescan the whole
+   * context per number; asking it with a second notion of "the same number" would
+   * be the two-tokenisers defect again. */
+  const sourcedValues = contextQuantities(context);
+
+  /* THE VALUE MAP: what the code may write into the reply on the model's behalf.
+   *
+   * Blocks first, then the turn's tool results — `measureValues` and `toolValues`
+   * both mint `<key>.n` and `<key>.as_of` under one convention, and
+   * `buildValueMap` drops any key two sources disagree about. This is the SAME
+   * block list `renderStrategistBlocks` rendered and `strategistEvidence`
+   * distilled: one assembler, three views. */
+  const values = buildValueMap([
+    ...measureValues(collectMeasures(args.data)),
+    ...recorded.flatMap((entry) => toolValues(entry.result)),
+  ]);
+
   const results: LawResult[] = [];
 
-  let lint = claimsLinter(draft, context);
+  /* SUBSTITUTE, THEN LINT. In that order, and the order is the design: the
+   * linter reads the text the OPERATOR will read, so a placeholder that resolved
+   * to a caption full of digits is linted as that caption, not as `{{key}}`. */
+  let substituted = substitute(draft, values);
+  let delivered = substituted.final;
+  let refused = substituted.violations.filter(
+    (violation) => !accountedFor(violation, sourcedValues),
+  );
+
+  let lint = claimsLinter(delivered, context);
   results.push(lint);
   let repaired = false;
 
-  if (!lint.passed) {
+  if (refused.length > 0 || !lint.passed) {
     repaired = true;
     messages.push({ role: 'assistant', content: draft });
-    messages.push({ role: 'user', content: repairInstruction(unsourcedFrom(lint)) });
+    messages.push({
+      role: 'user',
+      content: repairInstruction(refused, unsourcedFrom(lint)),
+    });
 
-    // No tools on the repair. The failure was a stated number, not a missing
-    // lookup, and re-opening the tool surface here would let one bad draft turn
-    // into a second round of spend.
+    // No tools on the repair. The failure was a stated number or a mis-typed
+    // key, not a missing lookup, and re-opening the tool surface here would let
+    // one bad draft turn into a second round of spend.
     const retry = await transport({
       model,
       quality: args.quality,
@@ -997,14 +1260,33 @@ export async function runAgentChat(args: RunChatArgs): Promise<ChatRunResult> {
     });
     account(retry);
     draft = retry.text;
-    lint = claimsLinter(draft, context);
+    substituted = substitute(draft, values);
+    delivered = substituted.final;
+    refused = substituted.violations.filter(
+      (violation) => !accountedFor(violation, sourcedValues),
+    );
+    lint = claimsLinter(delivered, context);
     results.push(lint);
   }
 
   /* ---- second violation: strip, in place, and say so --------------------- */
 
   const stripped: string[] = [];
-  let delivered = draft;
+
+  /* THE SUBSTITUTION FAULTS FIRST, and they are cut whatever the linter thinks.
+   * These are the figures the linter cannot see: a sub-100 head under its claim
+   * floor, a superscript outside its digit class, digits welded onto a real
+   * value. A placeholder fault carries no digits into the text — the engine put
+   * `[?]` where it stood — so there is nothing to cut for one. */
+  if (refused.length > 0) {
+    const outcome = stripSubstitutionViolations(delivered, refused);
+    if (outcome.stripped.length > 0) {
+      delivered = outcome.text;
+      stripped.push(...outcome.stripped);
+      lint = claimsLinter(delivered, context);
+      results.push(lint);
+    }
+  }
 
   for (let pass = 1; !lint.passed && pass <= MAX_STRIP_PASSES; pass += 1) {
     const outcome = stripUnsourcedNumbers(delivered, unsourcedFrom(lint));
@@ -1038,6 +1320,20 @@ export async function runAgentChat(args: RunChatArgs): Promise<ChatRunResult> {
     results: results.map(toRow),
   };
 
+  /* The tolerated class, named. Every quantity here is one the MODEL typed and
+   * the linter could source — delivered, and resting on the old guarantee. An
+   * empty list is the whole of what `hard_guarantee` claims. */
+  const typed = substituted.violations
+    .filter((violation) => accountedFor(violation, sourcedValues))
+    .map((violation) => violation.raw ?? '');
+
+  const substitution: ChatSubstitutionReport = {
+    substituted_keys: substituted.substitutions.map((made) => made.key),
+    typed,
+    refused: refused.map(toFault),
+    hard_guarantee: typed.length === 0,
+  };
+
   const cost = estimateCost(model, usage);
 
   return {
@@ -1045,6 +1341,7 @@ export async function runAgentChat(args: RunChatArgs): Promise<ChatRunResult> {
     cards,
     tools: recorded,
     law_report,
+    substitution,
     source_keys: sourceKeys,
     model,
     provider,

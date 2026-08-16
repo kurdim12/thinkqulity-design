@@ -1,6 +1,11 @@
 import type { z } from 'zod';
 import { HttpError } from '@/lib/auth';
-import { loadAgentContext, renderContextBlocks, type AgentContext } from '@/lib/agent/context';
+import {
+  agentContextEvidence,
+  loadAgentContext,
+  renderContextBlocks,
+  type AgentContext,
+} from '@/lib/agent/context';
 import { runAgentJson, type Quality } from '@/lib/agent/client';
 import { runLaw, type FrameLike, type GuidelineSection, type LawReport } from '@/lib/brain/law';
 import { retrieveCanon, type CanonHit } from '@/lib/brain/canon/retrieve';
@@ -106,7 +111,14 @@ export function defineFeature<TInput, TResult>(
       const ctx = await loadAgentContext();
       feature.preflight?.(input, ctx);
 
+      // What the MODEL reads: the blocks, in full. Captions, hooks and the
+      // workshop corpus included — a feature cannot match a register it has not
+      // been shown.
       const blocks = renderContextBlocks(ctx);
+      // What the LAW may treat as proof: the declared quantities of those same
+      // blocks, one per line, no prose. One assembler (`buildContextView`),
+      // read twice. See src/lib/agent/context-view.ts.
+      const evidence = agentContextEvidence(ctx);
       const baseMessage = [blocks, '', feature.buildPrompt(input, ctx)].join('\n');
 
       const run = await runAgentJson({
@@ -142,7 +154,14 @@ export function defineFeature<TInput, TResult>(
         const text = brainCfg.toText(candidate);
         const law = runLaw({
           text,
-          context: blocks,
+          // NOT `blocks`. The claims-linter traces a number in the output back
+          // to this string, and the blocks JSON-dump six hundred characters of
+          // every caption, the brand facts and every model-written hook — so a
+          // figure the client typed into a caption, or a model wrote into an
+          // earlier concept, used to arrive here as a measurement of his
+          // accounts. It is the round-3 attack through a door that needed no
+          // Unicode trick: the number was simply in the evidence.
+          context: evidence,
           swatches,
           voiceExamples,
           paletteReferences: brainCfg.paletteReferences?.(candidate),

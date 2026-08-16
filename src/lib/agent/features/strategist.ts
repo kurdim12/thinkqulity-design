@@ -13,6 +13,7 @@ import {
   collectSourceKeys,
   loadStrategistData,
   renderStrategistBlocks,
+  strategistEvidence,
   type StrategistData,
 } from '@/lib/agent/strategist/blocks';
 import {
@@ -48,13 +49,15 @@ import type { BrainReport, FeatureRunOutcome, RunnableFeature } from './types';
  *      this feature is allowed to speak about the client's account at all.
  *      Running it under the generic prompt would be shipping a different
  *      product with the same name.
- *   2. THE LAW WOULD READ THE WRONG CONTEXT. `defineFeature` passes
- *      `renderContextBlocks(ctx)` to `runLaw` as the context the claims-linter
- *      traces numbers against. Every quantity the strategist may state comes
- *      from `renderStrategistBlocks()` instead, and those two strings share
- *      almost nothing: an average this agent quoted correctly, with its key,
- *      would be reported as a number that "appears nowhere in the data it was
- *      given". The check would fail every honest run and pass nothing useful.
+ *   2. THE LAW WOULD READ THE WRONG CONTEXT. `defineFeature` traces numbers
+ *      against `agentContextEvidence(ctx)` — the declared quantities of the
+ *      app-wide four blocks. Every quantity the strategist may state comes from
+ *      its own blocks instead, so its evidence is `strategistEvidence(data)`,
+ *      and those two pools share almost nothing: an average this agent quoted
+ *      correctly, with its key, would be reported as a number that "appears
+ *      nowhere in the data it was given". The check would fail every honest run
+ *      and pass nothing useful. (Both surfaces now lint against DECLARED
+ *      VALUES rather than rendered prose; what differs is whose blocks.)
  *
  * So the Law → Judge → one-retry cycle below is the SAME cycle as
  * `defineFeature`'s, assembled from the same primitives (`runLaw`,
@@ -793,12 +796,23 @@ export function commitmentsCheck(payload: StrategistResponse, data: StrategistDa
 /* ============================================================== the text = */
 
 /**
- * Everything the payload says, flattened for the Law and the Judge.
+ * Everything the payload SAYS, flattened for the Law and the Judge.
  *
  * Basis values are printed beside their keys because that is what the
  * claims-linter reads: a figure with a key next to it traces back to the
  * blocks, and a figure without one is a number the agent produced on its own —
  * which is what the check is for.
+ *
+ * NO IDENTIFIER IS FLATTENED HERE, and that is a rule rather than an omission.
+ * A decision id is a foreign key, not something the output says to a reader —
+ * `client_digest_ar` never prints one — and a uuid's hyphen-separated groups
+ * tokenise as five bounded quantities that clear the claim floor
+ * (`11111111`, `4111`, `111111111111`, …). Flattening one made the Law demand a
+ * source for digits nobody was asserting as a measurement. It went unnoticed
+ * only because the RENDERED blocks were being used as the lint context and they
+ * carried the same uuid, so the id sourced itself; against declared evidence it
+ * is five unsourced numbers on every honest ledger review. Entries are named by
+ * POSITION instead, which is what `## Decisions` already did.
  */
 export function strategistToText(payload: StrategistResponse): string {
   const refs = (basis: readonly BasisRef[]): string =>
@@ -843,8 +857,8 @@ export function strategistToText(payload: StrategistResponse): string {
     sections.push(
       `## Ledger review\n${payload.ledger_review
         .map(
-          (r) =>
-            `- ${r.decision_id}: ${r.verdict}${r.new_review_after ? ` until ${r.new_review_after}` : ''}\n  ${r.outcome_note_ar}\n${refs(r.basis)}`,
+          (r, i) =>
+            `- [${i}] ${r.verdict}${r.new_review_after ? ` until ${r.new_review_after}` : ''}\n  ${r.outcome_note_ar}\n${refs(r.basis)}`,
         )
         .join('\n')}`,
     );
@@ -900,18 +914,32 @@ export function strategistToText(payload: StrategistResponse): string {
  * doing the right thing, and warnings that are wrong are how a report gets
  * skimmed.
  *
- * `context` is the strategist blocks, which is the entire reason this function
- * exists rather than `defineFeature`'s copy.
+ * `context` is the strategist's EVIDENCE — the value half of its keyed measures
+ * — which is the entire reason this function exists rather than
+ * `defineFeature`'s copy. It is emphatically NOT `blocks`: the rendered blocks
+ * carry the client's own captions, the audience's own comments and questions,
+ * shipped titles and past decision statements, and a figure inside any of those
+ * is text somebody typed, not a measurement. `strategistEvidence()` is the
+ * evidence view of the SAME block list the agent read — one assembler, two
+ * views — so the pool can never be about a different set of measures than it
+ * was shown. See `measureEvidence()` in ../strategist/blocks.ts for the
+ * doctrine and for what it costs.
+ *
+ * `blocks` is still passed, to `sourceKeys` and nowhere else: that check reads
+ * the RENDERED measures and compares a cited value character for character
+ * against the line it came from, which is a different question from "is this
+ * number sourced at all" and needs the rendering to answer it.
  */
 function strategistLaw(
   payload: StrategistResponse,
   blocks: string,
+  evidence: string,
   data: StrategistData,
   emitted: ReadonlySet<string>,
 ): LawReport {
   const base = runLaw({
     text: strategistToText(payload),
-    context: blocks,
+    context: evidence,
     swatches: data.brand?.palette?.swatches ?? null,
     sourceKeys: { claims: strategistClaims(payload), emitted, blocks },
   });
@@ -1288,6 +1316,9 @@ async function runStrategist(rawInput: unknown, quality: Quality): Promise<Featu
   strategistPreflight(data);
 
   const blocks = renderStrategistBlocks(data);
+  // The evidence view of the same blocks. Built here, beside the render, so the
+  // two are visibly one assembler read twice rather than two sources of truth.
+  const evidence = strategistEvidence(data);
   // Both halves of the source-key check come from the same block list, so the
   // keys it verifies against cannot drift from the keys the agent was shown.
   const emitted = collectSourceKeys(data);
@@ -1303,7 +1334,7 @@ async function runStrategist(rawInput: unknown, quality: Quality): Promise<Featu
   });
 
   const review = async (candidate: StrategistResponse) => {
-    const law = strategistLaw(candidate, blocks, data, emitted);
+    const law = strategistLaw(candidate, blocks, evidence, data, emitted);
     const judged = await runJudge({
       candidate: strategistToText(candidate),
       lawReport: law,

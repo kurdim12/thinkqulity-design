@@ -25,6 +25,26 @@ import { PageHeader, ErrorState, LoadingBlock, ArabicText } from '@/components/u
 import { ConceptCard } from '@/components/ConceptCard';
 import { formatDateTime, formatNumber } from '@/lib/date';
 import { GOLD } from '@/lib/theme';
+import {
+  buildFigureIndex,
+  EXTERNAL_FACTS_KIND,
+  hostOf,
+  markFigures,
+  parseToolPayload,
+  readBoolean,
+  readExternalClaims,
+  readNumber,
+  readRecord,
+  readRecords,
+  readSourceKeyMap,
+  readString,
+  readStrings,
+  type DeclaredValue,
+  type ExternalClaim,
+  type FigureIndex,
+  type MarkedReply,
+  type RefusedClaim,
+} from '@/lib/chat/transcript';
 import type { ChatMessageRow, ConceptRow, ConversationRow, PillarRow } from '@/lib/types/db';
 
 /**
@@ -149,70 +169,16 @@ const LOOKUP_FOLLOWER_HISTORY = 'follower_history';
 /* ================================================== reading unknown records ==
  *
  * `cards` is `Record<string, unknown>[]` and a tool row's `content` is a JSON
- * string, so everything below is narrowed at runtime. No `any`, no assertion:
- * a field that is not the expected type reads as absent, and absent renders as
- * an em-dash rather than as the word "undefined".
+ * string, so everything crossing that boundary is narrowed at runtime. No
+ * `any`, no assertion: a field that is not the expected type reads as absent,
+ * and absent renders as an em-dash rather than as the word "undefined".
+ *
+ * THE NARROWING LIVES IN src/lib/chat/transcript.ts, not here, and so does the
+ * figure marking and the external-claim reading below. A page may export
+ * nothing but `default`, so anything defined in this file is code no test can
+ * reach — and the one thing on this screen that must not rest on unexecuted
+ * code is the machinery that decides which numbers get a receipt.
  * ========================================================================== */
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function readString(source: Record<string, unknown>, key: string): string | null {
-  const value = source[key];
-  return typeof value === 'string' && value.length > 0 ? value : null;
-}
-
-function readNumber(source: Record<string, unknown>, key: string): number | null {
-  const value = source[key];
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-function readBoolean(source: Record<string, unknown>, key: string): boolean | null {
-  const value = source[key];
-  return typeof value === 'boolean' ? value : null;
-}
-
-function readRecord(source: Record<string, unknown>, key: string): Record<string, unknown> | null {
-  const value = source[key];
-  return isRecord(value) ? value : null;
-}
-
-function readStrings(source: Record<string, unknown>, key: string): string[] {
-  const value = source[key];
-  if (!Array.isArray(value)) return [];
-  return value.filter((entry): entry is string => typeof entry === 'string');
-}
-
-function readRecords(source: Record<string, unknown>, key: string): Record<string, unknown>[] {
-  const value = source[key];
-  if (!Array.isArray(value)) return [];
-  return value.filter(isRecord);
-}
-
-/** The `source_keys` map a cap payload carries: key → what produced the figure. */
-function readSourceKeyMap(source: Record<string, unknown>): Record<string, string> {
-  const raw = readRecord(source, 'source_keys');
-  if (raw === null) return {};
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(raw)) {
-    if (typeof value === 'string') out[key] = value;
-  }
-  return out;
-}
-
-/** A tool row's stored content, parsed. Null when it is not a JSON object. */
-function parseToolPayload(content: string): Record<string, unknown> | null {
-  try {
-    const parsed: unknown = JSON.parse(content);
-    return isRecord(parsed) ? parsed : null;
-  } catch {
-    // run.ts writes a one-line `TOOL ERROR (name): reason` string when an
-    // executor throws. It is not JSON and it is not a failure to parse it —
-    // it is rendered verbatim by the caller.
-    return null;
-  }
-}
 
 /* ================================================================== chips == */
 
@@ -262,6 +228,69 @@ function Sourced({
         {children}
       </span>
     </Popover>
+  );
+}
+
+/**
+ * ===========================================================================
+ * A FIGURE INSIDE THE PROSE, WITH ITS KEY ONE TAP AWAY
+ * ===========================================================================
+ * The same affordance as a stat chip — `Sourced`, not a second version of it —
+ * carried into the sentence, because a number in a paragraph is where an
+ * operator actually meets it and a chip above the paragraph is not the same
+ * assurance.
+ *
+ * WHAT THE MARK CLAIMS, EXACTLY. That this text is character for character a
+ * value one of this turn's own tool results declared under this key. It does
+ * NOT claim "code substituted this", and the note says so in both languages,
+ * because the per-turn substitution ledger is not stored on the row (see
+ * src/lib/chat/transcript.ts). Rounding the checkable claim up to the stronger
+ * one would be this screen committing the exact sin the pipeline was rebuilt to
+ * prevent.
+ *
+ * The tint is deliberately faint. Marking every figure loudly would turn a
+ * paragraph into a ransom note and an operator would stop reading the marks,
+ * which costs more than it buys.
+ */
+function SourcedFigure({ text, declared }: { text: string; declared: readonly DeclaredValue[] }) {
+  const { tt, locale } = useLocale();
+  const label = declared.find((entry) => entry.label !== null)?.label ?? null;
+  const sample = declared.find((entry) => entry.n !== null)?.n ?? null;
+  const asOf = declared.find((entry) => entry.as_of !== null)?.as_of ?? null;
+
+  return (
+    <Sourced
+      source={declared.map((entry) => entry.source_key).join('  ·  ')}
+      note={[
+        label,
+        sample === null ? null : `n = ${formatNumber(sample)}`,
+        asOf === null ? null : formatDateTime(asOf, locale),
+        declared.length > 1
+          ? tt(
+              'أكثر من مفتاح يعطي هذه القيمة نفسها، فالشاشة تعرضها كلها بدل أن تختار واحداً.',
+              'More than one key resolves to this same value, so the screen shows every one rather than picking.',
+            )
+          : null,
+        tt(
+          'هذا النصّ مطابق حرفاً بحرف لقيمة أعلنتها أداة في هذا الدور. الشاشة تتحقق من التطابق الحرفي، ولا تعيد تشغيل عملية الاستبدال: سجلّ الاستبدال لا يُحفظ مع الدور.',
+          'This text is character for character a value a tool declared in this turn. The screen verifies that exact match; it does not replay the substitution, because the substitution ledger is not stored with the turn.',
+        ),
+      ]
+        .filter((line): line is string => line !== null)
+        .join(' — ')}
+    >
+      <span
+        className="tq-num"
+        style={{
+          background: 'rgba(201, 162, 39, 0.16)',
+          borderRadius: 4,
+          paddingInline: 3,
+          fontWeight: 600,
+        }}
+      >
+        {text}
+      </span>
+    </Sourced>
   );
 }
 
@@ -443,6 +472,72 @@ function capStillBinds(notice: CapNotice): boolean {
   const resets = Date.parse(notice.resets_at);
   if (Number.isNaN(resets)) return true;
   return resets > Date.now();
+}
+
+/**
+ * Every value THIS tool result declared, in the spelling it declared it.
+ *
+ * The reconstruction of the half of `buildValueMap()` that survives into the
+ * transcript. `get_stats` puts `values[].value` in the payload AND the same
+ * string in `sourced`, and declares `${key}.n` as `String(n)` — so what is read
+ * back here is the identical text the substitution engine was offered, not a
+ * re-derivation of it. `formatNumber()` is deliberately not used on `n`: a
+ * grouped `1,234` is a different string from the `1234` that was substituted,
+ * and this is the one place on the screen where the string is the whole point.
+ *
+ * WHAT IS MISSING, and it is not small: the strategist's block values. They are
+ * never written to a row, so a figure substituted from the blocks arrives here
+ * with nothing to match against and is left unmarked. The footer says which of
+ * the two happened by saying what was checked, never by guessing.
+ */
+function declaredValues(payload: Record<string, unknown>): DeclaredValue[] {
+  const out: DeclaredValue[] = [];
+
+  for (const stat of readStatValues(payload)) {
+    out.push({
+      source_key: stat.source_key,
+      value: stat.value,
+      label: stat.label,
+      n: stat.n,
+      as_of: stat.as_of,
+    });
+    if (stat.n !== null) {
+      out.push({
+        source_key: `${stat.source_key}.n`,
+        value: String(stat.n),
+        label: `${stat.label} — n`,
+        n: null,
+        as_of: stat.as_of,
+      });
+    }
+  }
+
+  // A cap refusal states real figures under real keys, and a reply is allowed to
+  // repeat them. `CapPanel` already resolves these two through the same map.
+  const notice = readCapNotice(payload);
+  if (notice !== null) {
+    const keyFor = (name: string): string => notice.source_keys[name] ?? name;
+    if (notice.limit !== null) {
+      out.push({
+        source_key: keyFor('chat_cap.limit'),
+        value: String(notice.limit),
+        label: 'chat cap — limit',
+        n: null,
+        as_of: null,
+      });
+    }
+    if (notice.used !== null) {
+      out.push({
+        source_key: keyFor('chat_cap.used'),
+        value: String(notice.used),
+        label: 'chat cap — used',
+        n: null,
+        as_of: null,
+      });
+    }
+  }
+
+  return out;
 }
 
 function CapPanel({ notice }: { notice: CapNotice }) {
@@ -658,6 +753,295 @@ function SearchPostsPanel({ payload }: { payload: Record<string, unknown> }) {
   );
 }
 
+/* =================================================== external knowledge ==== */
+
+/**
+ * ===========================================================================
+ * WHAT SOMEBODY ELSE PUBLISHED — HARD RULE 21, MADE VISIBLE
+ * ===========================================================================
+ * A reader glancing at this screen must be able to tell "we measured this" from
+ * "someone published this" WITHOUT READING A WORD. So the two share no visual
+ * vocabulary at all, and the separation is by construction rather than by
+ * restraint:
+ *
+ *   a measurement  gold, solid, flat white, a tap-to-reveal SOURCE KEY, digits
+ *                  in `.tq-num`, a sample size and an observation date.
+ *   a claim        ink, dashed, striped ground, a URL and a retrieval instant,
+ *                  and NO key — because there is no key, and there is no path
+ *                  by which one could be minted (src/lib/web/facts.ts).
+ *
+ * `Sourced` IS NOT USED ANYWHERE IN THIS SUBTREE and must never be. It is the
+ * component that says "a key resolves this", and an external claim has none.
+ *
+ * The numbers inside a claim get no treatment of any kind — no chip, no key, no
+ * tap. That absence is the point: a follower count read on a web page is not a
+ * follower count, it is a claim someone published, and the screen renders it as
+ * the sentence it is rather than as a figure.
+ */
+const INK = '#42586E';
+
+const EXTERNAL_GROUND =
+  'repeating-linear-gradient(180deg, rgba(66, 88, 110, 0.045) 0 4px, rgba(255,255,255,0) 4px 9px)';
+
+/** Never a value meaning true. `corroborated` is two claims, not a measurement. */
+function ConfidenceTag({ confidence }: { confidence: string | null }) {
+  const { tt } = useLocale();
+  if (confidence === null) return null;
+  if (confidence === 'contradicted') {
+    return (
+      <Tag color="red" style={{ marginInlineEnd: 0 }}>
+        {tt('يناقض قياسنا', 'Contradicts our own measurement')}
+      </Tag>
+    );
+  }
+  if (confidence === 'corroborated') {
+    return (
+      <Tag style={{ marginInlineEnd: 0 }}>
+        {tt('كرّره أكثر من مصدر — وما زال ادعاءً', 'Repeated by more than one source — still a claim')}
+      </Tag>
+    );
+  }
+  return (
+    <Tag style={{ marginInlineEnd: 0 }}>{tt('غير مُتحقَّق منه', 'Unverified')}</Tag>
+  );
+}
+
+function ExternalClaimView({ claim }: { claim: ExternalClaim }) {
+  const { tt, locale } = useLocale();
+  const host = hostOf(claim.source_url);
+
+  return (
+    <div
+      style={{
+        border: `1px dashed ${INK}`,
+        borderRadius: 8,
+        padding: 10,
+        background: EXTERNAL_GROUND,
+      }}
+    >
+      {claim.about_client ? (
+        <div
+          style={{
+            border: '1px solid rgba(207, 19, 34, 0.45)',
+            background: 'rgba(207, 19, 34, 0.06)',
+            color: '#a8071a',
+            borderRadius: 6,
+            padding: 8,
+            fontSize: 12,
+            marginBlockEnd: 8,
+          }}
+        >
+          <div dir="auto" style={{ fontWeight: 600 }}>
+            {tt(
+              'هذا الادّعاء عن أحد حسابَي العميل',
+              'This claim is about one of the client’s own accounts',
+            )}
+          </div>
+          <div dir="auto" style={{ marginBlockStart: 2 }}>
+            {tt('الحساب: ', 'Account: ')}
+            <code dir="ltr">{claim.client_account ?? '—'}</code>
+            {' · '}
+            {tt('يزعم أنه: ', 'Purports to be: ')}
+            <code dir="ltr">{claim.client_measure ?? '—'}</code>
+          </div>
+          <div dir="auto" style={{ marginBlockStart: 4 }}>
+            {tt(
+              'هذا النظام يقيس ذلك بنفسه. صفحة تقول غير ذلك هي في أحسن الأحوال قديمة، ولا تصلح أن تكون هذا القياس.',
+              'This system measures that itself. A page that says otherwise is at best stale, and may never stand in for that measurement.',
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      <blockquote
+        dir="auto"
+        className="tq-ar"
+        style={{
+          margin: 0,
+          borderInlineStart: `3px solid ${INK}`,
+          paddingInlineStart: 10,
+          fontSize: 14,
+        }}
+      >
+        {claim.claim}
+      </blockquote>
+
+      <div className="tq-muted" style={{ fontSize: 11, marginBlockStart: 4 }}>
+        {tt('الادّعاء كما نُشر حرفياً — بلا تلخيص ولا تقريب ولا ترجمة.', 'The claim exactly as published — never summarised, rounded or translated.')}
+      </div>
+
+      <Space wrap size={10} style={{ fontSize: 12, marginBlockStart: 8 }}>
+        <span>
+          {tt('نشرَه: ', 'Published by: ')}
+          <a href={claim.source_url} target="_blank" rel="noopener noreferrer" dir="ltr">
+            {host ?? claim.source_url}
+          </a>
+        </span>
+        <span className="tq-muted">
+          {tt('قُرئ في ', 'Read on ')}
+          <span className="tq-num">{formatDateTime(claim.retrieved_at, locale)}</span>
+        </span>
+        <ConfidenceTag confidence={claim.confidence} />
+        {claim.kind ? (
+          <code dir="ltr" style={{ fontSize: 11 }}>
+            {claim.kind}
+          </code>
+        ) : null}
+      </Space>
+
+      <div style={{ fontSize: 11, marginBlockStart: 6 }} className="tq-muted">
+        <code dir="ltr" style={{ wordBreak: 'break-all' }}>
+          {claim.source_url}
+        </code>
+      </div>
+
+      {claim.page_title ? (
+        <div className="tq-muted" style={{ fontSize: 11 }} dir="auto">
+          {tt('عنوان الصفحة: ', 'Page title: ')}
+          {claim.page_title}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** A claim the screen refused to render as external knowledge. Shown, never dropped. */
+function RefusedClaimView({ refused }: { refused: RefusedClaim }) {
+  const { tt } = useLocale();
+  return (
+    <Alert
+      type="error"
+      showIcon
+      message={
+        <Space size={8} wrap align="center">
+          <span>{tt('ادّعاء خارجي مرفوض العرض', 'An external claim was refused')}</span>
+          <code dir="ltr" style={{ fontSize: 12 }}>
+            {refused.reason}
+          </code>
+        </Space>
+      }
+      description={
+        <Space direction="vertical" size={6} style={{ width: '100%' }}>
+          <div dir="auto" style={{ fontSize: 12 }}>
+            {refused.detail}
+          </div>
+          <Collapse
+            size="small"
+            items={[
+              {
+                key: 'raw',
+                label: (
+                  <span className="tq-muted" style={{ fontSize: 12 }}>
+                    {tt('ما وصل، حرفياً', 'What arrived, verbatim')}
+                  </span>
+                ),
+                children: (
+                  <pre
+                    dir="ltr"
+                    style={{ margin: 0, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+                  >
+                    {JSON.stringify(refused.raw, null, 2)}
+                  </pre>
+                ),
+              },
+            ]}
+          />
+        </Space>
+      }
+    />
+  );
+}
+
+/**
+ * The whole external block, including the retrieval that produced it.
+ *
+ * The ledger line is not decoration. Hard rule 22 says an external fetch is
+ * operator-triggered or scheduled, ledgered, and counted — so the screen shows
+ * WHO triggered it and WHEN, and a claim with no ledger row behind it reads as
+ * exactly that.
+ */
+function ExternalKnowledgePanel({ payload }: { payload: Record<string, unknown> }) {
+  const { tt, locale } = useLocale();
+  const { claims, refused } = readExternalClaims(payload);
+  const retrieval = readRecord(payload, 'retrieval');
+
+  return (
+    <div
+      style={{
+        border: `1px dashed ${INK}`,
+        borderInlineStartWidth: 3,
+        borderRadius: 10,
+        padding: 10,
+        background: EXTERNAL_GROUND,
+      }}
+    >
+      <div dir="auto" style={{ fontSize: 13, fontWeight: 600, color: INK }}>
+        {tt('معرفة خارجية — نشرها غيرنا', 'External knowledge — published by someone else')}
+      </div>
+      <div dir="auto" className="tq-muted" style={{ fontSize: 12, lineHeight: 1.9, marginBlockEnd: 10 }}>
+        {tt(
+          'كل ما في هذا الإطار كلامٌ نشره طرف آخر على الويب، محفوظاً كما هو، مع عنوانه ولحظة قراءته. ليس قياساً لهذين الحسابين، ولم نتحقق منه. ولا يحمل مفتاح مصدر، فلا يمكن أن يصير رقماً في أي تسليم.',
+          'Everything in this frame is text someone else published on the open web, kept word for word, with its address and the moment it was read. It is not a measurement of these two accounts, and we have not verified it. It carries no source key, so it can never become a figure in anything this studio delivers.',
+        )}
+      </div>
+
+      <Space direction="vertical" size={10} style={{ width: '100%' }}>
+        {claims.length === 0 && refused.length === 0 ? (
+          <div dir="auto" className="tq-muted" style={{ fontSize: 12 }}>
+            {tt(
+              'لا شيء مُسترجَع. لم تُقرأ أي صفحة لهذا السياق — وهذا ليس نفسه أن الويب لا يقول شيئاً.',
+              'Nothing retrieved. No page has been read for this context — which is not the same as the web saying nothing.',
+            )}
+          </div>
+        ) : null}
+
+        {claims.map((claim, index) => (
+          <ExternalClaimView key={`claim-${claim.source_url}-${index}`} claim={claim} />
+        ))}
+
+        {refused.map((entry, index) => (
+          <RefusedClaimView key={`refused-${entry.reason}-${index}`} refused={entry} />
+        ))}
+
+        {retrieval === null ? null : (
+          <div className="tq-muted" style={{ fontSize: 11, lineHeight: 1.9 }}>
+            <div>
+              {tt('الجلب مقيَّد في السجل: ', 'The fetch is on the ledger: ')}
+              <code dir="ltr" style={{ wordBreak: 'break-all' }}>
+                {readString(retrieval, 'final_url') ?? readString(retrieval, 'url') ?? '—'}
+              </code>
+            </div>
+            <Space wrap size={10}>
+              <span>
+                {tt('بطلب: ', 'Triggered by: ')}
+                <code dir="ltr">{readString(retrieval, 'trigger') ?? '—'}</code>
+                {' · '}
+                <code dir="ltr">{readString(retrieval, 'triggered_by') ?? '—'}</code>
+              </span>
+              <span>
+                {tt('الحالة: ', 'Status: ')}
+                <code dir="ltr">{readString(retrieval, 'status') ?? '—'}</code>
+              </span>
+              <span>
+                {tt('وقت الطلب: ', 'Requested: ')}
+                <span className="tq-num">
+                  {formatDateTime(readString(retrieval, 'requested_at'), locale)}
+                </span>
+              </span>
+            </Space>
+            <div>
+              {tt(
+                'لا أداة في هذه الشاشة تجلب من الويب من تلقاء نفسها. كل جلب يبدأه مشغّل أو جدول مسمّى، ويُقيَّد ويُحسب على السقف قبل أن يخرج الطلب.',
+                'No tool on this screen fetches from the web on its own initiative. Every fetch is started by an operator or a named schedule, and is ledgered and counted against the cap before the request goes out.',
+              )}
+            </div>
+          </div>
+        )}
+      </Space>
+    </div>
+  );
+}
+
 /**
  * One tool row, rendered by what it actually contains.
  *
@@ -677,6 +1061,12 @@ function ToolRow({ row }: { row: ChatMessageRow }) {
   const absences = payload === null ? [] : readAbsences(payload);
   const notes = payload === null ? [] : readStrings(payload, 'notes');
   const isSearch = payload !== null && readString(payload, 'tool') === 'search_posts';
+  // The marker, not the tool name: what makes a payload external knowledge is
+  // that it carries published claims, and the day a second surface produces
+  // them this branch already renders them under rule 21 rather than under the
+  // stat chips. `EXTERNAL_FACTS_KIND` is imported from the leaf module the
+  // emitting tool imports too, so there is no mirrored string to drift.
+  const isExternal = payload !== null && readString(payload, 'kind') === EXTERNAL_FACTS_KIND;
 
   return (
     <div
@@ -716,6 +1106,8 @@ function ToolRow({ row }: { row: ChatMessageRow }) {
         ) : null}
 
         {isSearch && payload !== null ? <SearchPostsPanel payload={payload} /> : null}
+
+        {isExternal && payload !== null ? <ExternalKnowledgePanel payload={payload} /> : null}
 
         {notes.length > 0 ? (
           <ul style={{ margin: 0, paddingInlineStart: 18, fontSize: 12 }} className="tq-muted">
@@ -1150,21 +1542,25 @@ function CardView({
 /* =============================================================== the reply == */
 
 /**
- * The delivered text, with the strip marker made visible where it stands.
+ * A run of prose, with the strip marker made visible where it stands.
  *
  * run.ts puts `UNSOURCED_CHIP` INTO the text, in place of a number it could not
  * source. This splits on that exact marker and renders a chip at each seam, so
  * the removal is legible rather than a run of Arabic guillemets a reader skims
  * past. Everything between the seams is the model's text, untouched.
+ *
+ * THE CHIP AND THE RECEIPT ARE THE TWO ENDS OF THE SAME CLAIM, and putting them
+ * in one paragraph is what makes either believable: a figure that resolves to a
+ * key wears one, a figure that resolved to nothing was cut and wears the other.
  */
-function ReplyBody({ text }: { text: string }) {
+function ProseSegment({ text }: { text: string }) {
   const { tt } = useLocale();
-  const segments = text.split(UNSOURCED_CHIP);
+  const parts = text.split(UNSOURCED_CHIP);
 
   return (
-    <ArabicText style={{ whiteSpace: 'pre-wrap', fontSize: 15 }}>
-      {segments.map((segment, index) => (
-        <span key={`segment-${index}`}>
+    <>
+      {parts.map((part, index) => (
+        <span key={`part-${index}`}>
           {index === 0 ? null : (
             <Tooltip
               title={tt(
@@ -1191,9 +1587,36 @@ function ReplyBody({ text }: { text: string }) {
               </mark>
             </Tooltip>
           )}
-          {segment}
+          {part}
         </span>
       ))}
+    </>
+  );
+}
+
+/**
+ * The delivered text: prose, strip chips, and figures that resolve to a key.
+ *
+ * The partition comes from `markFigures` and the segments are rendered in
+ * order, so the text on the screen is the delivered text character for
+ * character — the decoration cannot reorder, drop or edit a word. That
+ * invariant is asserted directly in tests/chat-transcript.test.ts rather than
+ * trusted here.
+ */
+function ReplyBody({ marked }: { marked: MarkedReply }) {
+  return (
+    <ArabicText style={{ whiteSpace: 'pre-wrap', fontSize: 15 }}>
+      {marked.segments.map((segment, index) =>
+        segment.kind === 'figure' ? (
+          <SourcedFigure
+            key={`segment-${index}`}
+            text={segment.text}
+            declared={segment.declared}
+          />
+        ) : (
+          <ProseSegment key={`segment-${index}`} text={segment.text} />
+        ),
+      )}
     </ArabicText>
   );
 }
@@ -1207,12 +1630,43 @@ function ReplyBody({ text }: { text: string }) {
  * not a claim about the accounts — and the values stay in the row for an audit
  * that goes to the database.
  */
-function LawFooter({ row }: { row: ChatMessageRow }) {
+function LawFooter({ row, marked }: { row: ChatMessageRow; marked: MarkedReply }) {
   const { tt } = useLocale();
   const report = row.law_report;
 
   return (
     <Space wrap size={12} style={{ fontSize: 11, marginBlockStart: 8 }} className="tq-muted">
+      {/* WHAT THE RECEIPTS COVER, AND WHAT THEY DO NOT.
+       *
+       * Stated on every turn, including the turns where the answer is "none",
+       * because a count that only appears when it is flattering is a count
+       * nobody should believe. `unmarked` is NOT an accusation and the copy
+       * refuses to make it one: the strategist's block values and the turn's
+       * substitution ledger are both absent from the stored row, so a figure
+       * code wrote from the blocks lands in exactly the same bucket as one the
+       * model typed. The honest thing a screen can say is what it checked
+       * against, and that is what this says. */}
+      <span>
+        <Tooltip
+          title={tt(
+            'الشاشة تقارن نصّ الرد المسلَّم بالقيم التي أعلنتها أدوات هذا الدور، حرفاً بحرف. ما لا يطابق ليس اتهاماً: قيم كتل الاستراتيجي لا تُحفظ مع الدور، وكذلك سجلّ الاستبدال نفسه — فما استبدله الكود من الكتل يقع هنا أيضاً.',
+            'The screen compares the delivered reply against the values this turn’s tools declared, character for character. What does not match is not an accusation: neither the strategist’s block values nor the substitution ledger itself is stored with the turn, so a figure code substituted from the blocks lands here too.',
+          )}
+        >
+          <span style={{ borderBlockEnd: '1px dotted currentColor', cursor: 'help' }}>
+            <span className="tq-num">{formatNumber(marked.marked)}</span>
+            {tt(' رقم يحمل مفتاحه', ' figure(s) carry a key')}
+            {marked.unmarked > 0 ? (
+              <>
+                {' · '}
+                <span className="tq-num">{formatNumber(marked.unmarked)}</span>
+                {tt(' لم يطابق ما هو محفوظ مع الدور', ' unmatched against what this turn stored')}
+              </>
+            ) : null}
+          </span>
+        </Tooltip>
+      </span>
+
       {report === null ? (
         <span>
           {tt(
@@ -1299,11 +1753,14 @@ function UserBubble({ text, pending }: { text: string; pending?: boolean }) {
 
 function AssistantBubble({
   row,
+  index,
   concepts,
   pillars,
   conceptsError,
 }: {
   row: ChatMessageRow;
+  /** The values THIS turn's tools declared. Empty for a turn that called none. */
+  index: FigureIndex;
   concepts: Map<string, ConceptRow>;
   pillars: PillarRow[];
   conceptsError: string | null;
@@ -1311,6 +1768,7 @@ function AssistantBubble({
   const { tt } = useLocale();
   const cards = row.cards ?? [];
   const hasText = row.content.trim().length > 0;
+  const marked = useMemo(() => markFigures(row.content, index), [row.content, index]);
 
   return (
     <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
@@ -1326,7 +1784,7 @@ function AssistantBubble({
         }}
       >
         {hasText ? (
-          <ReplyBody text={row.content} />
+          <ReplyBody marked={marked} />
         ) : (
           <span className="tq-muted" style={{ fontSize: 13 }}>
             {tt(
@@ -1350,7 +1808,7 @@ function AssistantBubble({
           </Space>
         ) : null}
 
-        <LawFooter row={row} />
+        <LawFooter row={row} marked={marked} />
       </div>
     </div>
   );
@@ -1414,6 +1872,90 @@ function ThinkingBubble({ pulse, elapsed }: { pulse: number; elapsed: number }) 
           {tt(
             'ثانية منذ الإرسال — بحسب ساعة هذا المتصفّح، لا الخادم.',
             'second(s) since you pressed send — by this browser’s clock, not the server’s.',
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =============================================================== the legend = */
+
+/**
+ * The two classes, side by side, in the treatment each actually gets.
+ *
+ * A rule stated in a paragraph is a rule an operator reads once. This is the
+ * same rule stated as the thing itself: the left sample IS a `Sourced` figure
+ * and the right sample IS the external frame, so a reader who learns to tell
+ * them apart here has learned to tell them apart in the transcript. If either
+ * treatment is ever changed, the legend changes with it — there is no second
+ * set of styles to forget.
+ */
+function ProvenanceLegend() {
+  const { tt } = useLocale();
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 16,
+        alignItems: 'flex-start',
+        border: '1px solid var(--tq-line)',
+        borderRadius: 10,
+        background: '#fff',
+        padding: 12,
+        marginBlockEnd: 16,
+      }}
+    >
+      <div style={{ flex: '1 1 260px', minInlineSize: 0 }}>
+        <Space size={8} align="center" wrap>
+          <SourcedFigure
+            text="508"
+            declared={[
+              {
+                source_key: 'performance.personal.avg_engagement',
+                value: '508',
+                label: tt('مثال في هذه اللوحة فقط', 'A sample, in this legend only'),
+                n: null,
+                as_of: null,
+              },
+            ]}
+          />
+          <span style={{ fontSize: 13, fontWeight: 600 }}>{tt('قِسناه', 'We measured this')}</span>
+        </Space>
+        <div dir="auto" className="tq-muted" style={{ fontSize: 12, lineHeight: 1.9, marginBlockStart: 4 }}>
+          {tt(
+            'رقم يحمل مفتاح مصدره. اضغط عليه ليظهر المفتاح وحجم العيّنة وتاريخ القياس. المفتاح وحده هو ما يمكن للكود أن يستبدله في نصّ.',
+            'A figure that carries its source key. Tap it for the key, the sample size and the observation date. A key is the only thing code will ever substitute into a text.',
+          )}
+        </div>
+      </div>
+
+      <div style={{ flex: '1 1 260px', minInlineSize: 0 }}>
+        <Space size={8} align="center" wrap>
+          <span
+            style={{
+              border: `1px dashed ${INK}`,
+              background: EXTERNAL_GROUND,
+              borderRadius: 6,
+              paddingInline: 8,
+              paddingBlock: 2,
+              fontSize: 12,
+              color: INK,
+            }}
+            dir="auto"
+          >
+            {tt('«…» — نشرها غيرنا', '“…” — published by someone else')}
+          </span>
+          <span style={{ fontSize: 13, fontWeight: 600 }}>
+            {tt('نشرَه غيرنا', 'Someone published this')}
+          </span>
+        </Space>
+        <div dir="auto" className="tq-muted" style={{ fontSize: 12, lineHeight: 1.9, marginBlockStart: 4 }}>
+          {tt(
+            'كلام منشور في مكان آخر، لم نتحقق منه، يصل بعنوانه وبلحظة قراءته — وبلا مفتاح مصدر أبداً. لا يصلح أن يكون قياساً لهذين الحسابين مهما بدا مؤكداً.',
+            'Text published elsewhere, unverified by us, arriving with its address and the moment it was read — and never with a source key. It cannot stand in for a measurement of these accounts, however confident it sounds.',
           )}
         </div>
       </div>
@@ -1605,6 +2147,46 @@ export default function ChatPage() {
   }, [messages]);
 
   const overCap = capNotice !== null && capStillBinds(capNotice);
+
+  /* ---- what each turn declared ------------------------------------------- */
+
+  /**
+   * One figure index per assistant turn, scoped to THAT turn's tool rows.
+   *
+   * The scoping is the whole correctness argument. `buildValueMap()` assembles
+   * a fresh map for every turn out of the blocks plus THIS turn's tool results,
+   * so a value declared three turns ago was not in scope when this reply was
+   * substituted, and carrying it forward here would put a receipt under a
+   * figure whose key was not on the table. The accumulator therefore resets at
+   * every user message and again at every assistant row.
+   *
+   * A turn that called no tool gets an EMPTY index and every figure in it goes
+   * unmarked. That is correct and it is the common case for a reply answered
+   * from the blocks alone — see `declaredValues` for what the transcript cannot
+   * hold.
+   */
+  const figureIndexes = useMemo<Map<string, FigureIndex>>(() => {
+    const byRow = new Map<string, FigureIndex>();
+    let pending: DeclaredValue[] = [];
+
+    for (const row of messages) {
+      if (row.role === 'user') {
+        pending = [];
+        continue;
+      }
+      if (row.role === 'tool') {
+        const payload = parseToolPayload(row.content);
+        if (payload !== null) pending.push(...declaredValues(payload));
+        continue;
+      }
+      byRow.set(row.id, buildFigureIndex(pending));
+      pending = [];
+    }
+
+    return byRow;
+  }, [messages]);
+
+  const emptyIndex = useMemo<FigureIndex>(() => buildFigureIndex([]), []);
 
   /* ---- sending ------------------------------------------------------------ */
 
@@ -1821,10 +2403,33 @@ export default function ChatPage() {
       <div style={{ fontSize: 16, fontWeight: 600, marginBlockEnd: 6 }}>
         {tt('اسأل عن الحسابين', 'Ask about the two accounts')}
       </div>
-      <div className="tq-muted" style={{ fontSize: 13, lineHeight: 1.9, marginBlockEnd: 16 }}>
+      <div className="tq-muted" style={{ fontSize: 13, lineHeight: 1.9, marginBlockEnd: 12 }}>
         {tt(
           'كل رقم في الجواب مأخوذ حرفياً من مصدر يحمل مفتاحه. وأكثر القياسات غير موجودة على هذا التثبيت بعد، فجواب «لا قياس حتى الآن» جواب صحيح لا عطل — وهو ما يجعل الأرقام الموجودة تستحق التصديق.',
           'Every number in an answer is quoted verbatim from a source that carries its key. Most measurements do not exist on this deployment yet, so “no measurement yet” is a correct answer rather than a fault — and it is what makes the figures that do exist worth believing.',
+        )}
+      </div>
+
+      {/* Rule 21 and rule 22, in the state this deployment is actually in. An
+          empty external block reads as "we looked and there is nothing"; a
+          missing one reads as "nothing was looked up", and those are different
+          answers. This screen's is the second, and it says so. */}
+      <div
+        dir="auto"
+        className="tq-muted"
+        style={{
+          fontSize: 12,
+          lineHeight: 1.9,
+          marginBlockEnd: 16,
+          border: `1px dashed ${INK}`,
+          borderRadius: 8,
+          background: EXTERNAL_GROUND,
+          padding: 10,
+        }}
+      >
+        {tt(
+          'ولا معرفة خارجية بعد: لم تُقرأ أي صفحة ويب لأي محادثة هنا. لا شيء في هذه الشاشة مأخوذ من الويب، ولن يظهر شيء منه إلا بعد استرجاع يبدأه مشغّل ويُقيَّد في السجل — لا يجلب النموذج من تلقاء نفسه في منتصف جملة.',
+          'And no external knowledge yet: no web page has been read for any conversation here. Nothing on this screen came off the web, and nothing will until an operator starts a retrieval that is written to the ledger — the model does not fetch on its own initiative mid-sentence.',
         )}
       </div>
 
@@ -1902,6 +2507,7 @@ export default function ChatPage() {
               <AssistantBubble
                 key={row.id}
                 row={row}
+                index={figureIndexes.get(row.id) ?? emptyIndex}
                 concepts={conceptIndex}
                 pillars={pillars}
                 conceptsError={conceptsError}
@@ -2002,6 +2608,8 @@ export default function ChatPage() {
           'Every reply is written in full and its numbers are checked against the blocks and the tool results before it is delivered. And a deliverable — concepts, campaigns, reports, guidelines — is never written here: the feature that owns it produces it behind its own full gate, and it arrives as a card.',
         )}
       />
+
+      <ProvenanceLegend />
 
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={8} xl={7}>

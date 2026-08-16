@@ -332,15 +332,77 @@ function isClaim(quantity: Quantity): boolean {
 }
 
 /**
+ * A hex colour literal, anchored: `#` then three or six hex digits, ending
+ * there. Deliberately the same shape `HEX` matches in ./palette-claims.ts —
+ * the exemption below is safe only because that check is looking at exactly
+ * these tokens.
+ */
+const HEX_LITERAL = /^#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?(?![0-9a-fA-F])/u;
+const HEX_DIGIT = /[0-9a-fA-F]/u;
+
+/**
+ * Whether this quantity is the body of a hex colour literal — `181818` in
+ * `#181818`.
+ *
+ * ===========================================================================
+ * A COLOUR IS A LABEL, NOT A MAGNITUDE
+ * ===========================================================================
+ * `#181818` is a colour the brand owns. No reader takes it for a count of
+ * anything, and the check that governs it is `paletteClaims`, which runs on
+ * EVERY `runLaw` call — it is the one check with no `if` in front of it. So a
+ * hex-shaped token in any output is already answered: either it expands to a
+ * swatch the brand actually records, or it is a violation. Asking the
+ * claims-linter to ALSO demand a numeric source for its digits is double
+ * jeopardy on a value that is not a quantity, and the only sources that could
+ * ever satisfy it are the palette dumped into the lint context as prose — which
+ * is precisely what src/lib/agent/context-view.ts stopped doing.
+ *
+ * It was latent, not new: the chat path has traced against declared values
+ * since v4 and would already refuse a reply naming `#181818`. It surfaced when
+ * the other five surfaces were brought onto the same footing, and it is fixed
+ * where it lives rather than by widening what counts as evidence — a hex is not
+ * a measurement and must never enter an evidence pool.
+ *
+ * WHY THIS CANNOT LAUNDER A NUMBER. `#881234` exempts 881234 from this check
+ * and hands it straight to `paletteClaims`, which fails it unless the brand
+ * really records that colour; with no palette recorded, every hex fails. A run
+ * that is not exactly three or six hex digits — `#88123` — is not a literal at
+ * all and stays a claim. CONTAINMENT, not overlap: a quantity that starts
+ * inside the literal and runs past its end (`#181818.5`) is not exempt. And a
+ * marked or adjacent quantity is never exempt, so the two rules that exist to
+ * stop a figure being split or dressed as a percentage keep their absolute
+ * force — this removes exactly the bare, whole body of a real colour literal
+ * and nothing else.
+ */
+function colourLiteral(text: string, quantity: Quantity): boolean {
+  if (quantity.marked || quantity.adjacent) return false;
+
+  // Walk back over hex digits to find where the literal would have to start.
+  let body = quantity.start;
+  while (body > 0 && HEX_DIGIT.test(text.charAt(body - 1))) body -= 1;
+  if (body === 0 || text.charAt(body - 1) !== '#') return false;
+
+  const literal = HEX_LITERAL.exec(text.slice(body - 1));
+  if (literal === null) return false;
+  return quantity.end <= body - 1 + literal[0].length;
+}
+
+/**
  * Every quantity a draft states as fact, with its offsets.
  *
  * Exported because the chat gate has to CUT these back out of the text when the
  * model will not withdraw them, and it must cut exactly what was linted. There
  * used to be a copy of the claim regex in src/lib/agent/chat/run.ts, mirrored by
  * hand and documented as a drift risk; it is gone, and this is why.
+ *
+ * `colourLiteral` needs the surrounding text, which is why the exemption is
+ * applied here rather than inside `isClaim` — a `Quantity` alone cannot tell
+ * whether a `#` stood in front of it.
  */
 export function claimQuantities(text: string): Quantity[] {
-  return quantities(text).filter(isClaim);
+  return quantities(text).filter(
+    (quantity) => isClaim(quantity) && !colourLiteral(text, quantity),
+  );
 }
 
 export function claimsLinter(output: string, context: string): LawResult {

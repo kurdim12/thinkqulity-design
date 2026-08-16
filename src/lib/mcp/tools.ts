@@ -48,7 +48,7 @@ import { z } from 'zod';
 import { MissingEnvError, optionalEnv, positiveIntEnv, type EnvKey } from '@/lib/env';
 import { HttpError } from '@/lib/auth';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { loadAgentContext, renderContextBlocks } from '@/lib/agent/context';
+import { agentContextEvidence, loadAgentContext, renderContextBlocks } from '@/lib/agent/context';
 import { runLaw, type LawReport, type LawResult } from '@/lib/brain/law';
 import { retrieveCanon, type CanonHit } from '@/lib/brain/canon/retrieve';
 import { reconcile, runJudge, type JudgeVerdict } from '@/lib/brain/judge';
@@ -874,8 +874,24 @@ function reservationRefusal(
 
 /* ==================================================== shared brain plumbing ==*/
 
+/**
+ * TWO HALVES, AND ONLY ONE OF THEM IS EVIDENCE — the same split
+ * `ChatToolResult` keeps in ../agent/chat/run.ts.
+ *
+ * `blocks` is what a MODEL reads: the Judge, and the rewrite prompt. It carries
+ * the captions and the workshop corpus because a ruling about register cannot
+ * be made without them.
+ *
+ * `evidence` is what the LAW may trace a number back to: the declared
+ * quantities of those same blocks and nothing else. Handing `blocks` to
+ * `runLaw` as `context` — which this file did until now — made every caption
+ * excerpt, every model-written hook and every free-text brand fact a source for
+ * a figure about the client's accounts, to an EXTERNAL caller who cannot see
+ * the blocks and cannot check.
+ */
 interface BrainContext {
   blocks: string;
+  evidence: string;
   swatches: Record<string, string> | null;
   voiceExamples: string[];
 }
@@ -884,6 +900,7 @@ async function loadBrainContext(): Promise<BrainContext> {
   const ctx = await loadAgentContext();
   return {
     blocks: renderContextBlocks(ctx),
+    evidence: agentContextEvidence(ctx),
     swatches: ctx.brand.palette?.swatches ?? null,
     voiceExamples: ctx.brand.voice_examples.map((v) => v.text),
   };
@@ -1146,11 +1163,12 @@ const checkComplianceTool: McpTool = {
       throw err;
     }
 
-    const { blocks, swatches, voiceExamples } = await loadBrainContext();
+    const { blocks, evidence, swatches, voiceExamples } = await loadBrainContext();
 
     // Deterministic, offline, and unconditional. This half of the answer does
     // not depend on a model answering, on a key existing, or on the cap.
-    const law = runLaw({ text, context: blocks, swatches, voiceExamples });
+    // `evidence`, never `blocks` — see BrainContext.
+    const law = runLaw({ text, context: evidence, swatches, voiceExamples });
 
     if (cap.remaining <= 0) {
       return result({
@@ -1531,10 +1549,13 @@ const generateConceptsTool: McpTool = {
      * were taken before any of it could bill, which is the property finding 1
      * was about.
      * -------------------------------------------------------------------- */
-    const { blocks, swatches, voiceExamples } = await loadBrainContext();
+    const { blocks, evidence, swatches, voiceExamples } = await loadBrainContext();
     const candidate = conceptsToText(concepts);
 
-    const law = runLaw({ text: candidate, context: blocks, swatches, voiceExamples });
+    // `evidence`, never `blocks` — see BrainContext. This one matters twice
+    // over: the concepts the Law is reading were generated FROM these blocks,
+    // so a hook that echoed a caption's figure would otherwise source itself.
+    const law = runLaw({ text: candidate, context: evidence, swatches, voiceExamples });
 
     const canon = await retrieveCanon(
       'post concept structure, hook, caption, social copy standards',

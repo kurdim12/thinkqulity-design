@@ -473,9 +473,17 @@ function reset(): void {
 }
 
 /** The brand context the Law reads. Injected so no database round trip is
- *  needed for the deterministic half — the Law itself is NOT faked. */
+ *  needed for the deterministic half — the Law itself is NOT faked.
+ *
+ *  TWO VIEWS, and the fixture keeps them apart deliberately: `blocks` is prose
+ *  a model reads and `evidence` is the declared-quantity pool the claims-linter
+ *  traces against. The 400 in the prose is NOT in the evidence, so a tool that
+ *  passed `blocks` to `runLaw` — as this file's subject did until v5 — would be
+ *  caught by tests/context-evidence.test.ts's laundering probes rather than
+ *  quietly passing here. */
 const brandContext = async () => ({
   blocks: '<performance>personal avg_engagement 400 over 5 posts</performance>',
+  evidence: '',
   swatches: SWATCHES,
   voiceExamples: VOICE,
 });
