@@ -12,6 +12,7 @@ import {
 import { claimsLinter } from '../src/lib/brain/law/claims-linter.ts';
 import type {
   ChatToolCallRecord,
+  ChatToolResult,
   ChatToolSpec,
   ChatTransport,
   ChatTransportRequest,
@@ -811,9 +812,20 @@ test('a real tool result still sources its own measured values — the fix is no
 
   const evidence = lintEvidence(result);
   assert.notEqual(evidence, '', 'a successful read declares something');
-  assert.match(evidence, /performance\.snapshot\.taken_on/, 'keyed, per hard rule 12');
-  assert.ok(evidence.includes(SNAPSHOT_DAY), 'the snapshot date it measured over');
-  assert.match(evidence, /\[posts\.matched\] = "0"/);
+  assert.ok(evidence.split('\n').includes('0'), 'the count it measured is evidence for itself');
+
+  // AND THE TWO HALVES THAT ARE NOT EVIDENCE, asserted rather than assumed.
+  // The KEY is not: it can be minted from a model-authored cluster label (see
+  // EXPLOIT 5 below), so it is rendered for the operator's log and never here.
+  assert.equal(
+    evidence.includes('performance.snapshot.taken_on'),
+    false,
+    'a source_key reached the lint context',
+  );
+  // The DATE is not: a value that is not itself a quantity cannot source one.
+  // The cost is nil — every part of an ISO date is below the claim floor or is
+  // a year, so no reply can state one as a claim in the first place.
+  assert.equal(evidence.includes(SNAPSHOT_DAY), false, 'a date is not a quantity');
 });
 
 /* ============================================ defect 2: whole-token matching ==*/
@@ -939,4 +951,140 @@ test('the stripper leaves text alone when nothing was flagged', () => {
   assert.deepEqual(stripUnsourcedNumbers(text, []), { text, stripped: [] });
   // A flagged number that is not present changes nothing either.
   assert.deepEqual(stripUnsourcedNumbers(text, ['777']), { text, stripped: [] });
+});
+
+/* ========================== defect 3: two definitions of "a number" ==========
+ *
+ * The claims-linter used to hold one regex for finding CLAIMS in a draft and a
+ * different one for finding EVIDENCE in the context. Every disagreement between
+ * them was a door. Three of those doors are replayed here at the GATE — not at
+ * the linter, which tests/law.test.ts covers — because what matters is whether
+ * an operator sees the number, and that is decided by the whole cycle: lint,
+ * repair once, strip, re-lint.
+ * ========================================================================== */
+
+/** U+066C, the Arabic thousands separator. Named rather than pasted, because an
+ *  invisible or near-invisible character in a fixture is unreadable evidence. */
+const ARABIC_THOUSANDS = String.fromCharCode(0x066c);
+
+test('EXPLOIT 1 at the gate — a figure split by a separator is not delivered', async () => {
+  // «٨٨٬٥٠٨»: the head is under the claim floor and used to be dropped in
+  // silence, the tail is a real measured figure, and the reader is handed a
+  // follower count no row has ever held.
+  const split = `٨٨${ARABIC_THOUSANDS}٥٠٨`;
+  assert.equal(BLOCKS.includes('88508'), false, 'the trap is real: nothing sources it');
+  assert.ok(BLOCKS.includes('508'), 'and the tail really is sourced, or this proves nothing');
+
+  const cited = `عدد المتابعين ${split} متابع [profiles.academy.followers].`;
+  const model = fakeModel([{ text: cited }, { text: cited }]);
+
+  const outcome = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'كم عدد المتابعين؟',
+    quality: 'standard',
+    transport: model.transport,
+  });
+
+  assert.deepEqual(outcome.law_report.stripped, [split], 'the whole figure was cut, not its head');
+  assert.equal(outcome.reply, `عدد المتابعين ${UNSOURCED_CHIP} متابع [profiles.academy.followers].`);
+  assert.equal(outcome.law_report.passed, true, 'what is delivered passes the linter');
+});
+
+test('EXPLOIT 5 — a source_key is never evidence, whoever minted it', () => {
+  /* src/lib/agent/chat/stats.ts mints a cluster key segment from
+   * `cluster_label` — a string the board-analysis MODEL wrote into
+   * post_analyses. The evidence half used to be rendered as `[key] = "value"`
+   * and mined whole, so a model that had named a cluster could name its own
+   * evidence. The table is empty today; it stops being empty the moment board
+   * analysis runs. */
+  const poisoned: ChatToolResult = {
+    content: 'content is never evidence — this line only proves the tool answered.',
+    sourced: [{ value: '0', source_key: `performance.clusters.${LAUNDERED}.n` }],
+  };
+
+  const evidence = lintEvidence(poisoned);
+  assert.equal(evidence.includes(LAUNDERED), false, 'the key reached the lint context');
+  assert.equal(claimsLinter(`عدد المتابعين ${LAUNDERED} متابع.`, evidence).passed, false);
+
+  // THE CONTROL. The declared VALUE still sources itself, so this is a boundary
+  // and not a mute button.
+  const real: ChatToolResult = {
+    content: 'irrelevant',
+    sourced: [{ value: '508', source_key: 'performance.personal.avg_engagement' }],
+  };
+  assert.equal(claimsLinter('المعدل 508 لكل منشور.', lintEvidence(real)).passed, true);
+});
+
+/**
+ * The client's own caption, carried into the blocks so the agent can hear his
+ * register. Everything else about this fixture is the empty state the chat
+ * surface actually meets.
+ */
+function dataWithCaption(caption: string): StrategistData {
+  return {
+    ...chatData(),
+    brand: {
+      id: 1,
+      facts: [],
+      voice_examples: [{ text: caption, source_url: null, engagement: null }],
+      knowledge: [],
+      assets: [],
+      palette: null,
+      typography: null,
+      audience_notes: null,
+      status: 'live',
+      updated_at: TODAY,
+    },
+  };
+}
+
+test('EXPLOIT 6 — client free text in a block is not evidence for its own numbers', async () => {
+  const caption = `عدد المتدربين ${LAUNDERED} متدرب.`;
+  const data = dataWithCaption(caption);
+
+  // The caption still reaches the MODEL verbatim. That is what a voice example
+  // is for, and the fix must not take it away.
+  assert.ok(renderStrategistBlocks(data).includes(LAUNDERED), 'the model is still shown the caption');
+
+  const cited = `عدد المتابعين ${LAUNDERED} متابع [profiles.academy.followers].`;
+  const model = fakeModel([{ text: cited }, { text: cited }]);
+
+  const outcome = await runAgentChat({
+    data,
+    history: [],
+    message: 'كم عدد المتابعين؟',
+    quality: 'standard',
+    transport: model.transport,
+  });
+
+  assert.deepEqual(outcome.law_report.stripped, [LAUNDERED], 'the caption sourced the claim');
+  assert.equal(outcome.reply.includes(LAUNDERED), false);
+  assert.ok(outcome.reply.includes(UNSOURCED_CHIP));
+});
+
+test('THE COST OF EXPLOIT 6 — a caption quoting a real figure now gets chipped', async () => {
+  /* Stated rather than discovered later. Free-text block values are no longer
+   * evidence, so a caption that quotes a number nothing else measures makes that
+   * number unquotable — the reply loses it and the chip says so. The number in
+   * the caption below is the same invented probe, which is the honest way to
+   * write this test: there is no real caption in this repository holding a
+   * figure that no measure holds.
+   *
+   * The other direction of the same trade is asserted above and below: a figure
+   * a MEASURE holds is still quotable, so what was lost is exactly the class
+   * "numbers that exist only inside text somebody typed". */
+  const outcome = await runAgentChat({
+    data: dataWithCaption(`في ورشتنا ${LAUNDERED} متدرب.`),
+    history: [],
+    message: 'اقتبس من كتاباته',
+    quality: 'standard',
+    transport: fakeModel([
+      { text: `كما كتب: «في ورشتنا ${LAUNDERED} متدرب.»` },
+      { text: `كما كتب: «في ورشتنا ${LAUNDERED} متدرب.»` },
+    ]).transport,
+  });
+
+  assert.deepEqual(outcome.law_report.stripped, [LAUNDERED]);
+  assert.equal(outcome.reply, `كما كتب: «في ورشتنا ${UNSOURCED_CHIP} متدرب.»`);
 });

@@ -78,6 +78,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { wholeQuantity } from '../../brain/law/claims-linter.ts';
 import {
   distinctPosts,
   scanCoverage,
@@ -1181,6 +1182,70 @@ export function collectMeasures(data: StrategistData): Measure[] {
  */
 export function collectSourceKeys(data: StrategistData): Set<string> {
   return new Set(collectMeasures(data).map((measure) => measure.key));
+}
+
+/* ==================================================== what counts as evidence */
+
+/**
+ * ===========================================================================
+ * WHAT THE BLOCKS RENDER AND WHAT THEY VOUCH FOR ARE TWO DIFFERENT THINGS
+ * ===========================================================================
+ *
+ * `renderStrategistBlocks()` is what the AGENT READS. It has to carry the
+ * client's own captions, the audience's own comments and questions, the titles
+ * of shipped pieces and the text of past decisions — that is what a voice
+ * example is FOR, and the agent cannot match a register it has not been shown.
+ *
+ * This is what the LAW TRACES A NUMBER BACK TO, and it is a different list. The
+ * defect that made the distinction necessary was executed: a caption reading
+ * «عدد المتدربين 88123» was rendered into the lint context verbatim, so the
+ * claims-linter found 88123 there and the agent could state 88123 as measured
+ * fact. The same held for an audience comment, an audience question, a shipped
+ * title and a decision statement. None of those is a measurement. All of them
+ * are text somebody typed — the client, the audience, or a model.
+ *
+ * THE RULE, and it is structural rather than a list of the five known carriers:
+ * a measure is evidence only where its VALUE IS ITSELF A QUANTITY. `508` is;
+ * «عدد المتدربين 88123 متدرب» is not, it is prose that contains digits. A sixth
+ * free-text measure added later is therefore not evidence either, and nobody has
+ * to remember to exclude it.
+ *
+ * THE COST, stated rather than discovered later: a caption or a comment that
+ * quotes a REAL figure no measure holds makes that figure unquotable. The agent
+ * that repeats it has the number cut out and the chip left in its place, even
+ * though the client himself wrote it. That is the right way round for this
+ * product — the alternative is that anything ever typed into the account becomes
+ * a citable statistic — but it is a real loss and it will be visible the first
+ * time a caption quoting a workshop headcount is quoted back.
+ *
+ * The KEY is not evidence either, and never appears here. A key can be MINTED
+ * FROM DATA — `performance.clusters.<label>` takes its segment from a cluster
+ * label a model wrote — and `keySegment()` preserves `\p{N}`, so a model that
+ * named a cluster could otherwise have named its own evidence.
+ *
+ * `n` IS evidence: it is a count this code computed, and the blocks contract
+ * tells the agent to carry it with the figure, so it must be quotable.
+ *
+ * ONE ASSEMBLER. This is built from `collectMeasures()`, the same block list
+ * `renderStrategistBlocks()` renders, so the evidence can never be about a
+ * different set of measures than the agent was shown.
+ */
+export function measureEvidence(measures: readonly Measure[]): string[] {
+  const values: string[] = [];
+  for (const measure of measures) {
+    if (wholeQuantity(measure.value) !== null) values.push(measure.value);
+    if (measure.n !== null && measure.n !== undefined) values.push(String(measure.n));
+  }
+  return values;
+}
+
+/**
+ * The lint context for anything generated against these blocks: one declared
+ * quantity per line, no key, no label, no prose. Pass this to the Law as
+ * `context` — never the rendered blocks.
+ */
+export function strategistEvidence(data: StrategistData): string {
+  return measureEvidence(collectMeasures(data)).join('\n');
 }
 
 /* ========================================================================= */

@@ -2,7 +2,10 @@ import Anthropic from '@anthropic-ai/sdk';
 import { HttpError } from '@/lib/auth';
 import { requireEnv } from '@/lib/env';
 import type { Quality } from '@/lib/prefs';
-import { claimsLinter, fail, normaliseDigits, type LawResult } from '@/lib/brain/law';
+import { claimsLinter, fail, type LawResult } from '@/lib/brain/law';
+// Imported from the module rather than the barrel: these are the MECHANISM the
+// claims-linter is built from, not part of the Law's public verdict surface.
+import { claimQuantities, wholeQuantity } from '@/lib/brain/law/claims-linter';
 import type { ChatLawReportRow, ChatLawResultRow, ChatToolCallRecord } from '@/lib/types/db';
 // Re-exported because anyone writing a `ToolExecutor` needs this shape, and the
 // row type and the runtime type must stay the same type — not two that agree.
@@ -10,6 +13,7 @@ export type { ChatToolCallRecord } from '@/lib/types/db';
 import {
   collectSourceKeys,
   renderStrategistBlocks,
+  strategistEvidence,
   type StrategistData,
 } from '../strategist/blocks';
 import { effortFor, modelFor, providerKeyName, resolveProvider, type Provider } from '../provider';
@@ -37,9 +41,11 @@ import { CHAT_SYSTEM } from './system';
  *
  *   1. The model drafts a reply, with tools, over a windowed history.
  *   2. The draft is linted by the REAL claims-linter (src/lib/brain/law) against
- *      the rendered strategist blocks AND the DECLARED half of every tool result
- *      this turn produced — `ChatToolResult.sourced`, never `content`. See that
- *      type for the laundering attack the split closes.
+ *      the DECLARED VALUES of the strategist blocks AND the DECLARED half of
+ *      every tool result this turn produced — `ChatToolResult.sourced`, never
+ *      `content`. See that type for the laundering attack the split closes, and
+ *      `measureEvidence()` in ../strategist/blocks.ts for why the lint context
+ *      is the block VALUES rather than the rendered blocks the model reads.
  *   3. A violation buys exactly ONE repair — the failing numbers are named back
  *      to the model and it drafts again, without tools.
  *   4. A second violation is not argued with. The offending numbers are
@@ -64,8 +70,10 @@ import { CHAT_SYSTEM } from './system';
  * nobody budgeted and, worse, an unlinted surface: its output would re-enter the
  * context as if it were source material. Code truncation cannot invent.
  *
- * ONE ASSEMBLER. The context is built by `renderStrategistBlocks()` — the same
- * function, on the same `StrategistData`, that the strategist reads. This module
+ * ONE ASSEMBLER. What the model reads is `renderStrategistBlocks()` — the same
+ * function, on the same `StrategistData`, that the strategist reads. What the
+ * Law traces a number back to is `strategistEvidence()`, the evidence view of
+ * that same block list. Two views, one assembler, never a fork. This module
  * takes the DATA, not a pre-rendered string, so a caller cannot hand chat a
  * forked or hand-written context. `collectSourceKeys()` comes from the same
  * block list, so the keys reported here are by construction the keys the model
@@ -180,9 +188,22 @@ export interface ChatToolResult {
 }
 
 /**
- * The lint evidence one tool result contributes: its declared values, one per
- * line, keyed where a key exists — the same `[key] = "value"` shape the
- * strategist blocks use, so the linter meets one notation and not two.
+ * The lint evidence one tool result contributes: its declared VALUES, one per
+ * line. No key, no label, no prose.
+ *
+ * THE KEY IS NOT EVIDENCE. This used to render `[key] = "value"` and the whole
+ * line was mined, which made the key a second, unguarded channel into the
+ * evidence pool — and a key can be minted from data. `runStatLookup`'s cluster
+ * lookup builds `performance.clusters.<label>` from `cluster_label`, a string
+ * the board-analysis MODEL wrote into post_analyses, and key segments preserve
+ * `\p{N}`. A model that had named a cluster could name its own evidence. The
+ * key is still rendered into `content` for the agent and still travels in
+ * `source_keys` for the log; it simply cannot source a number.
+ *
+ * A VALUE IS EVIDENCE ONLY WHERE IT IS ITSELF A QUANTITY. `wholeQuantity()` is
+ * the same boundary the strategist blocks apply — see `measureEvidence()` in
+ * ../strategist/blocks.ts for the doctrine and its cost. A declared date, url,
+ * uuid or label contains digits without measuring anything, and drops out here.
  *
  * A result with no `sourced` half renders to the empty string and is dropped
  * from the context entirely. That is the fail-closed property: silence, not
@@ -190,9 +211,8 @@ export interface ChatToolResult {
  */
 export function lintEvidence(result: ChatToolResult): string {
   return (result.sourced ?? [])
-    .map((entry) =>
-      entry.source_key === undefined ? entry.value : `[${entry.source_key}] = "${entry.value}"`,
-    )
+    .filter((entry) => wholeQuantity(entry.value) !== null)
+    .map((entry) => entry.value)
     .join('\n');
 }
 
@@ -399,60 +419,16 @@ export function windowHistory(
 /* ========================================================== pure: strip === */
 
 /**
- * MIRRORS `METRIC` in src/lib/brain/law/claims-linter.ts, character for
- * character, and the filter below mirrors that file's `extract()`.
+ * There is no claim regex in this file, and that is the fix.
  *
- * Why a mirror rather than an import: the linter's regex is module-private and
- * the linter answers a different question — "is anything unsourced?" — while
- * this file needs WHERE each claim sits so it can be cut out. Duplication is the
- * cost; drift is the risk, and it is covered two ways. At runtime `applyGate`
- * re-lints after stripping and never delivers text the real linter still
- * rejects. In tests, chat-lint.test.ts asserts the stripped output passes the
- * real linter, so a change to `METRIC` that this mirror did not follow fails
- * there rather than in production.
+ * There used to be `METRIC_MIRROR`: a hand-copied duplicate of the linter's claim
+ * pattern, kept here because the stripper needs to know WHERE each claim sits
+ * while the linter only answers whether any is unsourced. A mirror is a second
+ * definition of "a number", and this app has already paid for having two of
+ * those — see the header of src/lib/brain/law/claims-linter.ts. The linter now
+ * exports the spans it linted, so what gets cut out is by construction what got
+ * checked, and there is nothing left to drift.
  */
-const METRIC_MIRROR = /(\d[\d,]*(?:\.\d+)?)\s*(%|×|x\b)?/g;
-
-interface ClaimSpan {
-  start: number;
-  end: number;
-  value: number;
-}
-
-/**
- * Every metric claim in `normalised`, with its offsets.
- *
- * THE PROPERTY THIS RESTS ON: `normaliseDigits` maps one digit character to one
- * digit character (Arabic-Indic ٠-٩ and extended ۰-۹ → ASCII), so the normalised
- * string is the SAME LENGTH as the original and every offset means the same
- * thing in both. That is what makes it possible to find a claim in normalised
- * text and cut it out of Arabic text without touching a single surrounding
- * letter, mark or space.
- */
-function claimSpans(normalised: string): ClaimSpan[] {
-  const spans: ClaimSpan[] = [];
-
-  for (const match of normalised.matchAll(METRIC_MIRROR)) {
-    const raw = match[1];
-    const marked = Boolean(match[2]);
-    const value = Number(raw.replace(/,/g, ''));
-    if (!Number.isFinite(value)) continue;
-    const isYear = !marked && value >= 1900 && value <= 2100 && !raw.includes(',');
-    if (isYear) continue;
-    if (!marked && value < 100) continue;
-
-    const start = match.index ?? -1;
-    if (start < 0) continue;
-
-    // `\s*` is greedy and the unit marker is optional, so an unmarked match
-    // swallows the space that follows it. Give that space back, or the chip
-    // would glue itself to the next Arabic word.
-    const text = marked ? match[0] : match[0].replace(/\s+$/, '');
-    spans.push({ start, end: start + text.length, value });
-  }
-
-  return spans;
-}
 
 /** The numbers a failing claims-linter result named, or [] when it named none. */
 export function unsourcedFrom(result: LawResult): string[] {
@@ -481,23 +457,27 @@ export function stripUnsourcedNumbers(
 ): StripOutcome {
   if (unsourced.length === 0) return { text, stripped: [] };
 
-  const targets = new Set<number>();
+  // Matched on the linter's own canonical key, so `٧٧٧`, `777` and `0777` are
+  // one target and a 17-digit id is not the same target as its neighbour.
+  const targets = new Set<string>();
   for (const entry of unsourced) {
-    const value = Number(normaliseDigits(entry).replace(/,/g, ''));
-    if (Number.isFinite(value)) targets.add(value);
+    const key = wholeQuantity(entry);
+    if (key !== null) targets.add(key);
   }
   if (targets.size === 0) return { text, stripped: [] };
 
-  const spans = claimSpans(normaliseDigits(text)).filter((span) => targets.has(span.value));
+  const spans = claimQuantities(text).filter((claim) => targets.has(claim.key));
   if (spans.length === 0) return { text, stripped: [] };
 
   const stripped: string[] = [];
   let out = '';
   let cursor = 0;
   for (const span of spans) {
+    // The unit marker goes with the figure — a bare `%` left standing would read
+    // as a claim the chip did not remove.
     out += text.slice(cursor, span.start) + UNSOURCED_CHIP;
-    stripped.push(text.slice(span.start, span.end));
-    cursor = span.end;
+    stripped.push(text.slice(span.start, span.markerEnd));
+    cursor = span.markerEnd;
   }
   out += text.slice(cursor);
 
@@ -870,6 +850,9 @@ export async function runAgentChat(args: RunChatArgs): Promise<ChatRunResult> {
   /* ---- context: the ONE assembler, on the strategist's own data ---------- */
 
   const blocks = renderStrategistBlocks(args.data);
+  // The evidence view of the same blocks. Built here, beside the render, so the
+  // two are visibly one assembler read twice rather than two sources of truth.
+  const evidence = strategistEvidence(args.data);
   const sourceKeys = [...collectSourceKeys(args.data)];
 
   const window = windowHistory(args.history, args.historyTokenBudget ?? HISTORY_TOKEN_BUDGET);
@@ -972,14 +955,22 @@ export async function runAgentChat(args: RunChatArgs): Promise<ChatRunResult> {
 
   /* ---- the gate ---------------------------------------------------------- */
 
-  /* THE LINT CONTEXT: the blocks, plus the DECLARED half of every tool result.
+  /* THE LINT CONTEXT: the DECLARED VALUES of the blocks, plus the DECLARED half
+   * of every tool result. Not the blocks. Not any prose.
+   *
+   * `strategistEvidence` is the evidence view of the SAME block list the model
+   * read a moment ago — one assembler, two views, so the evidence can never be
+   * about a different set of measures than the agent was shown. What it leaves
+   * out is what a model or a client wrote: captions, comments, questions,
+   * titles, decision statements and every source_key. See `measureEvidence()`
+   * in ../strategist/blocks.ts for why, and for what that costs.
    *
    * `lintEvidence` reads `result.sourced` and nothing else, so a tool's
    * human-readable `content` — which may quote back the lookup name, the
    * filters, the tool name or the feature the MODEL supplied — cannot be cited
    * as its own source. A tool that declares no values contributes an empty
    * string and is dropped here rather than trusted. */
-  const context = [blocks, ...recorded.map((entry) => lintEvidence(entry.result))]
+  const context = [evidence, ...recorded.map((entry) => lintEvidence(entry.result))]
     .filter((part) => part !== '')
     .join('\n\n');
   const results: LawResult[] = [];
@@ -1025,9 +1016,10 @@ export async function runAgentChat(args: RunChatArgs): Promise<ChatRunResult> {
   }
 
   if (!lint.passed) {
-    // Unreachable unless METRIC_MIRROR has drifted from the linter's own regex.
-    // The safe direction is to say nothing rather than to say a number nobody
-    // can source, so the reply is withheld and the report records why.
+    // Unreachable while the stripper cuts what the linter linted — it now cuts
+    // the linter's own spans, so there is no mirror left to drift. The safe
+    // direction is to say nothing rather than to say a number nobody can
+    // source, so the reply is withheld and the report records why.
     results.push(
       fail(
         'chat-gate',

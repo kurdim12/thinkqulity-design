@@ -139,29 +139,48 @@ function sourced(claim: string, context: string): boolean {
   return claimsLinter(`القيمة ${claim} في القياس.`, context).passed;
 }
 
-/** The token set itself, sorted, so a boundary rule can be read off the test. */
-function tokens(context: string): number[] {
-  return [...contextQuantities(context)].sort((a, b) => a - b);
+/**
+ * The token set itself, so a boundary rule can be read off the test.
+ *
+ * STRINGS, not numbers: the linter compares canonical spellings, because
+ * `Number("17509995080123456") === Number("17509995080123457")` is true and an
+ * id that rounds onto its neighbour sources a figure nobody measured. Sorted
+ * numerically all the same, so the expectations below stay readable.
+ */
+function tokens(context: string): string[] {
+  return [...contextQuantities(context)].sort((a, b) =>
+    a.localeCompare(b, 'en', { numeric: true }),
+  );
 }
 
 test('the context tokeniser splits on boundaries, not inside quantities', () => {
   // A digit run glued to a letter is an identifier fragment, not a quantity.
-  assert.deepEqual(tokens('ig_id 1750899508 and uuid 550e8400-e29b-41d4'), [1750899508]);
+  assert.deepEqual(tokens('ig_id 1750899508 and uuid 550e8400-e29b-41d4'), ['1750899508']);
   // Separators hold a quantity together; markers end it without hiding it.
-  assert.deepEqual(tokens('96,520 then 507.97 then 340% then 13×'), [13, 340, 507.97, 96520]);
-  // Both scripts reach the same numbers, which is why normaliseDigits runs first.
-  assert.deepEqual(tokens('٩٦٬٥٢٠ و ٥٠٧٫٩٧ و ٣٤٠٪'), [340, 507.97, 96520]);
-  // A date yields its parts, and none of them is the id beside it.
-  assert.deepEqual(tokens('2026-08-14 at 10:45'), [8, 10, 14, 45, 2026]);
+  assert.deepEqual(tokens('96,520 then 507.97 then 340% then 13×'), [
+    '13',
+    '340',
+    '507.97',
+    '96520',
+  ]);
+  // Both scripts reach the same quantities, which is why one normaliser runs.
+  assert.deepEqual(tokens('٩٦٬٥٢٠ و ٥٠٧٫٩٧ و ٣٤٠٪'), ['340', '507.97', '96520']);
+  // A date yields its parts, and none of them is the id beside it. `08` and `8`
+  // are one key: a canonical spelling carries no leading zero.
+  assert.deepEqual(tokens('2026-08-14 at 10:45'), ['8', '10', '14', '45', '2026']);
   // In a real ISO instant the letters swallow the parts they touch: 14 and 10
   // are glued to the T and the seconds to the Z, so none of them is a quantity
   // anybody may quote. Only the month and the minutes survive, and both are far
   // below the threshold at which a bare number counts as a claim at all.
-  assert.deepEqual(tokens('2026-08-14T10:45:00Z'), [8, 45, 2026]);
+  assert.deepEqual(tokens('2026-08-14T10:45:00Z'), ['8', '45', '2026']);
   // A blocks line yields exactly the sample size and the figure, plus the date.
+  // Production no longer lints against a line in this shape — the key half is
+  // not evidence, so run.ts and blocks.ts hand the linter the VALUES alone —
+  // but the tokeniser's own boundary rules are still stated here, at the level
+  // they live at.
   assert.deepEqual(
     tokens('[performance.personal.avg_engagement] mean (n=190, as_of=2026-08-14) = "508"'),
-    [8, 14, 190, 508, 2026],
+    ['8', '14', '190', '508', '2026'],
   );
 });
 
@@ -225,6 +244,92 @@ test('claims-linter lets a unit marker end a token rather than hide it', () => {
   // A trailing x is the one letter allowed to end a token, because `13x` is
   // read as a marked claim on the output side too.
   assert.equal(sourced('340', 'growth 340%'), true);
+});
+
+/* ============================================ the executed exploits, replayed ==
+ *
+ * This file used to hold TWO definitions of "a number": one that found CLAIMS in
+ * a draft and one that found EVIDENCE in a context. Every disagreement between
+ * them was a door, and four of them were walked through against the running
+ * gate. Each is replayed below as the attack it was, with its true-positive
+ * control beside it, because a check that stopped finding real numbers would be
+ * a worse bug than the ones it replaced.
+ *
+ * The probe numbers are the ones the proofs used. None of them is a measurement
+ * of anything: 88123 is the laundering probe, 88508 the split probe, and the two
+ * ids below are an id and its off-by-one neighbour. They are invented on
+ * purpose — that is what makes them traps.
+ * ============================================================================= */
+
+/** 88508, in Arabic-Indic digits, waiting to be split by one separator. */
+const SPLIT_HEAD = '٨٨';
+const SPLIT_TAIL = '٥٠٨';
+
+/**
+ * Every separator the executed attack used. Not one of them is exotic: the
+ * Arabic thousands separator is how the figure is spelled correctly, and the
+ * rest are the space characters any keyboard and any copy-paste produce.
+ */
+const SPLIT_SEPARATORS: readonly { name: string; char: string }[] = [
+  { name: 'U+066C, the Arabic thousands separator', char: '\u066C' },
+  { name: 'a plain space', char: '\u0020' },
+  { name: 'a no-break space', char: '\u00A0' },
+  { name: 'a narrow no-break space', char: '\u202F' },
+  { name: 'a zero-width space', char: '\u200B' },
+  { name: 'a zero-width non-joiner', char: '\u200C' },
+  { name: 'a right-to-left mark', char: '\u200F' },
+  { name: 'a newline', char: '\n' },
+];
+
+test('EXPLOIT 1 — a claim cannot be split into a sub-100 head and a sourced tail', () => {
+  // CONTEXT sources 508 and nothing sources 88508, so every draft below states a
+  // figure no measurement holds. The head is under the claim floor, which is
+  // exactly what used to make it disappear silently.
+  assert.equal(CONTEXT.includes('88508'), false, 'the trap is real: nothing sources it');
+  for (const separator of SPLIT_SEPARATORS) {
+    const draft = `عدد المتابعين ${SPLIT_HEAD}${separator.char}${SPLIT_TAIL} متابع.`;
+    assert.equal(
+      claimsLinter(draft, CONTEXT).passed,
+      false,
+      `${separator.name}: the figure passed with only its tail sourced`,
+    );
+  }
+});
+
+test('EXPLOIT 2 — a comma list does not manufacture the number it spells', () => {
+  // "ids: 1,2,3" used to yield the single evidence token 123.
+  assert.equal(sourced('123', 'ids: 1,2,3'), false);
+  assert.equal(sourced('123', 'ranks: 1, 2, 3'), false);
+  // THE CONTROL. A real grouped figure is still one quantity, in both scripts,
+  // and still sources itself however the claim spells it.
+  assert.equal(sourced('96520', 'total = 96,520'), true);
+  assert.equal(sourced('96,520', 'total = 96520'), true);
+  assert.equal(sourced('96520', 'المجموع ٩٦٬٥٢٠'), true);
+});
+
+/** An id past 2^53, and the id one digit away from it. */
+const BIG_ID = '17509995080123456';
+const BIG_ID_NEIGHBOUR = '17509995080123457';
+
+test('EXPLOIT 3 — an id does not source its off-by-one neighbour', () => {
+  // The two ids are ONE JavaScript number, which is why comparing by value was
+  // the defect. If this assertion ever fails, the exploit is gone from the
+  // language and this test can go with it.
+  assert.equal(Number(BIG_ID) === Number(BIG_ID_NEIGHBOUR), true);
+  assert.equal(sourced(BIG_ID_NEIGHBOUR, `ig_id: ${BIG_ID}`), false);
+  // THE CONTROL. The id still sources itself, exactly and only.
+  assert.equal(sourced(BIG_ID, `ig_id: ${BIG_ID}`), true);
+});
+
+test('EXPLOIT 4 — no numeral script is invisible to the claim extractor', () => {
+  // 88123 in full-width and in Devanagari digits, against an EMPTY context.
+  // Neither used to be seen as a claim at all, so both were delivered.
+  assert.equal(claimsLinter('عدد المتدربين ８８１２３ متدرب.', '').passed, false);
+  assert.equal(claimsLinter('عدد المتدربين ८८१२३ متدرب.', '').passed, false);
+  // THE CONTROL. One normaliser, so every script reaches the same quantity and a
+  // context that really does state the figure still sources it.
+  assert.equal(claimsLinter('عدد المتدربين ８８１２３ متدرب.', 'trainees = 88123').passed, true);
+  assert.equal(claimsLinter('عدد المتدربين ८८१२३ متدرب.', 'trainees = 88123').passed, true);
 });
 
 /* --------------------------------------------------------- register-score -- */

@@ -86,7 +86,7 @@ import {
   type ScanCoverage,
 } from '@/lib/audience/posts';
 import { buildTiming, MIN_WINDOW_N } from '@/lib/audience/timing';
-import { formatQuantity } from '@/lib/agent/strategist/blocks';
+import { formatQuantity, uniqueSegments } from '@/lib/agent/strategist/blocks';
 import type { Account, PostRow, ProfileSnapshotRow } from '@/lib/types/db';
 
 /* ================================================================ shapes == */
@@ -597,10 +597,21 @@ const clusterAggregates: StatLookup = {
       .slice(0, parsed.data.limit);
 
     const values: StatValue[] = [];
-    for (const group of ranked) {
-      // The label is the cluster's own text and may be Arabic. It is used
-      // verbatim in the key segment position, matching what blocks.ts does.
-      const base = `performance.clusters.${group.label}`;
+    /* THE SEGMENT IS MINTED, NOT PASTED. `cluster_label` is a string the
+     * board-analysis MODEL wrote into post_analyses, and it used to be dropped
+     * into the key position verbatim — a key with a space, a dot or a quote in
+     * it names nothing stable, and two clusters whose labels differed only in
+     * punctuation named the same key. `uniqueSegments()` is what blocks.ts
+     * already does with the same labels, imported rather than re-implemented so
+     * the two surfaces mint ONE namespace instead of two that nearly agree.
+     *
+     * This does not make the key safe to lint against, and it is not meant to:
+     * segments keep `\p{N}`, so a cluster named "88123" still mints a key with
+     * 88123 in it. What makes that harmless is that a source_key is never
+     * evidence — see `lintEvidence()` in ./run.ts. */
+    const segments = uniqueSegments(ranked.map((group) => group.label));
+    for (const [index, group] of ranked.entries()) {
+      const base = `performance.clusters.${segments[index]}`;
       values.push(
         textValue(`${base}.account`, 'which account this cluster was measured on', group.account),
       );
