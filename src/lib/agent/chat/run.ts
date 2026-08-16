@@ -37,7 +37,9 @@ import { CHAT_SYSTEM } from './system';
  *
  *   1. The model drafts a reply, with tools, over a windowed history.
  *   2. The draft is linted by the REAL claims-linter (src/lib/brain/law) against
- *      the rendered strategist blocks AND every tool result this turn produced.
+ *      the rendered strategist blocks AND the DECLARED half of every tool result
+ *      this turn produced — `ChatToolResult.sourced`, never `content`. See that
+ *      type for the laundering attack the split closes.
  *   3. A violation buys exactly ONE repair — the failing numbers are named back
  *      to the model and it drafts again, without tools.
  *   4. A second violation is not argued with. The offending numbers are
@@ -115,19 +117,83 @@ export type ToolParameterSchema = {
 };
 
 /**
+ * One value a tool COMPUTED, ready to be evidence.
+ *
+ * `value` is TEXT, exactly as the tool wrote it into `content`, so nothing here
+ * can re-round a figure on its way to the linter — the same contract
+ * `StatValue.value` keeps in ./stats.ts and `Measure` keeps in the blocks.
+ */
+export interface SourcedValue {
+  value: string;
+  /**
+   * Hard rule 12 — the key that resolves this value, where one exists. Omitted
+   * rather than invented when the value has no key in the namespace: a made-up
+   * key is a citation that resolves to nothing, which is worse than none.
+   */
+  source_key?: string;
+}
+
+/**
  * What a tool handed back.
  *
- * `content` is fed to the model verbatim AND becomes part of the context the
- * linter checks the reply against — those are the same string on purpose. A tool
- * result the model can read but the linter cannot see would be a hole straight
- * through rule 16.
+ * ===========================================================================
+ * TWO HALVES, AND ONLY ONE OF THEM IS EVIDENCE
+ * ===========================================================================
+ *
+ * `content` is what the MODEL reads: JSON, a refusal, a catalogue, a sentence
+ * naming what went wrong. It is deliberately generous, because a model that can
+ * see why it was refused answers better than one that met a silence.
+ *
+ * `sourced` is what the LINTER reads, and it is the tool's own declaration of
+ * the values the SYSTEM produced. Nothing else in this object reaches the lint
+ * context.
+ *
+ * THE DEFECT THIS SHAPE EXISTS TO CLOSE. `content` used to be both. But several
+ * tools echo model-supplied strings back inside it — the lookup name that did
+ * not exist, the filters that were asked for, the tool name that is not a tool,
+ * the feature that cannot be dispatched. Every one of those refusals is free,
+ * so a model could call `get_stats("followers_88123")`, have 88123 quoted back
+ * to it inside the refusal, and cite 88123 on the next turn as a number "in the
+ * context". It was executed and it worked: with `profile_snapshots` empty, the
+ * gate delivered a follower count that no row anywhere has ever held.
+ *
+ * The split is structural rather than a list of the four known echoes. A tool
+ * that declares nothing contributes NOTHING to the lint context, so a fifth
+ * echo added later fails closed — the number it repeats is simply not evidence,
+ * and no one has to remember to add it to a denylist. The cost is that a tool
+ * which forgets to declare a real value gets that value stripped out of the
+ * reply, which is the direction this app errs in on purpose.
  */
 export interface ChatToolResult {
+  /** Fed to the model verbatim. NEVER lint evidence — see `sourced`. */
   content: string;
+  /**
+   * The values this tool COMPUTED, and the whole of what the claims-linter is
+   * allowed to trace a number in the reply back to. Absent means this result
+   * sources nothing, which is the safe default and never an error.
+   */
+  sourced?: SourcedValue[];
   /** The source_keys the values in `content` carry, for the log. */
   source_keys?: string[];
   /** A dispatched deliverable, as a card. Never the deliverable's text. */
   card?: Record<string, unknown>;
+}
+
+/**
+ * The lint evidence one tool result contributes: its declared values, one per
+ * line, keyed where a key exists — the same `[key] = "value"` shape the
+ * strategist blocks use, so the linter meets one notation and not two.
+ *
+ * A result with no `sourced` half renders to the empty string and is dropped
+ * from the context entirely. That is the fail-closed property: silence, not
+ * trust.
+ */
+export function lintEvidence(result: ChatToolResult): string {
+  return (result.sourced ?? [])
+    .map((entry) =>
+      entry.source_key === undefined ? entry.value : `[${entry.source_key}] = "${entry.value}"`,
+    )
+    .join('\n');
 }
 
 export type ToolExecutor = (call: ChatToolCallRecord) => Promise<ChatToolResult>;
@@ -868,9 +934,14 @@ export async function runAgentChat(args: RunChatArgs): Promise<ChatRunResult> {
       } catch (err) {
         // A refusal is an answer. Hard rule 18's cap refusal, a missing lookup,
         // a dispatch that would not run — the model must be able to SAY so, so
-        // the failure travels back as a tool result instead of a 500. It also
-        // becomes part of the lint context, which is correct: a cap message
-        // naming a number is a source for that number.
+        // the failure travels back as a tool result instead of a 500.
+        //
+        // NOTHING IS DECLARED SOURCED HERE, and that is the point: `call.name`
+        // is a string the MODEL chose and `reason` is an exception message
+        // nobody shaped, so neither is evidence for a quantity. The real tools
+        // never reach this path — `createChatToolExecutor` shapes its own
+        // failures and declares what they source — so this is the last net, and
+        // a net fails closed.
         const reason = err instanceof Error ? err.message : 'The tool failed.';
         result = { content: `TOOL ERROR (${call.name}): ${reason}` };
       }
@@ -901,7 +972,16 @@ export async function runAgentChat(args: RunChatArgs): Promise<ChatRunResult> {
 
   /* ---- the gate ---------------------------------------------------------- */
 
-  const context = [blocks, ...recorded.map((entry) => entry.result.content)].join('\n\n');
+  /* THE LINT CONTEXT: the blocks, plus the DECLARED half of every tool result.
+   *
+   * `lintEvidence` reads `result.sourced` and nothing else, so a tool's
+   * human-readable `content` — which may quote back the lookup name, the
+   * filters, the tool name or the feature the MODEL supplied — cannot be cited
+   * as its own source. A tool that declares no values contributes an empty
+   * string and is dropped here rather than trusted. */
+  const context = [blocks, ...recorded.map((entry) => lintEvidence(entry.result))]
+    .filter((part) => part !== '')
+    .join('\n\n');
   const results: LawResult[] = [];
 
   let lint = claimsLinter(draft, context);

@@ -123,6 +123,7 @@ import { CapUnavailableError } from '@/lib/mcp/tools';
 import {
   CHAT_DISPATCHABLE,
   CHAT_DISPATCH_TOOL,
+  capSourcedValues,
   defaultDispatchDeps,
   dispatchToolSpec,
   isDispatchable,
@@ -137,7 +138,13 @@ import {
   STAT_LOOKUP_NAMES,
   type StatLookupOutcome,
 } from './stats';
-import type { ChatToolCallRecord, ChatToolResult, ChatToolSpec, ToolParameterSchema } from './run';
+import type {
+  ChatToolCallRecord,
+  ChatToolResult,
+  ChatToolSpec,
+  SourcedValue,
+  ToolParameterSchema,
+} from './run';
 import type { Account, BrandRow, Grounding, PostRow } from '@/lib/types/db';
 
 /* ============================================================ dependencies ==*/
@@ -210,8 +217,16 @@ const defaultJudgeRunner: JudgeRunner = async (input) => {
 /* ================================================================ results ==*/
 
 /**
- * Every tool answers in the same envelope: JSON text for the model and for the
- * linter, plus an optional card.
+ * Every tool answers in the same envelope: JSON text for the model, an explicit
+ * list of the values that JSON is EVIDENCE for, and an optional card.
+ *
+ * `payload` IS NOT EVIDENCE. It is written for the model and it deliberately
+ * quotes back what the model asked for — the lookup name that does not exist,
+ * the filters that were applied, the tool name that is not a tool — because a
+ * refusal that names the mistake is answerable and a refusal that hides it is
+ * not. `sourced` is the separate, explicit half the claims-linter reads, and it
+ * DEFAULTS TO EMPTY: a handler that declares nothing sources nothing. See
+ * `ChatToolResult` in ./run.ts for the laundering attack that shape closes.
  *
  * CARDS ARE FOR THINGS THAT MUST BE VISIBLE INDEPENDENTLY OF THE PROSE — a
  * stored artefact, a compliance verdict, a failure. A stat lookup gets no card:
@@ -220,13 +235,34 @@ const defaultJudgeRunner: JudgeRunner = async (input) => {
  */
 function toolResult(
   payload: Record<string, unknown>,
-  extra: { card?: Record<string, unknown>; source_keys?: string[] } = {},
+  extra: {
+    card?: Record<string, unknown>;
+    source_keys?: string[];
+    sourced?: SourcedValue[];
+  } = {},
 ): ChatToolResult {
   return {
     content: JSON.stringify(payload, null, 2),
+    sourced: extra.sourced ?? [],
     ...(extra.source_keys ? { source_keys: extra.source_keys } : {}),
     ...(extra.card ? { card: extra.card } : {}),
   };
+}
+
+/**
+ * A measured number, declared. Null and NaN produce NO entry rather than a zero
+ * — hard rule 2: an absent quantity is an em-dash, and a value the linter can
+ * source is a value the model may state.
+ */
+function sourcedNumber(value: number | null | undefined, source_key?: string): SourcedValue[] {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return [];
+  return [source_key === undefined ? { value: String(value) } : { value: String(value), source_key }];
+}
+
+/** A stored string — a date, an id, a recorded fact. Blank and null declare nothing. */
+function sourcedText(value: string | null | undefined, source_key?: string): SourcedValue[] {
+  if (typeof value !== 'string' || value.trim() === '') return [];
+  return [source_key === undefined ? { value } : { value, source_key }];
 }
 
 /** The failure card. Never a swallowed error, never an apology in prose. */
@@ -562,6 +598,26 @@ function lawSummary(report: LawReport): Record<string, unknown> {
   };
 }
 
+/**
+ * What a review sources: the COUNTS, and nothing that quotes the text back.
+ *
+ * A FIFTH ECHO, found by applying the rule rather than by reading the list of
+ * four. `report.results` carries each check's evidence, and the claims-linter's
+ * own evidence names the offending numbers verbatim — "2 number(s) appear in the
+ * output but nowhere in the data it was given: 340, 92." The text under review
+ * is a `text` parameter the MODEL supplied, so passing that report through as
+ * lint evidence would let any number be sourced by asking `run_compliance` to
+ * judge a sentence containing it. The counts are computed here; the evidence
+ * strings are the input, reflected. Only the counts are declared.
+ */
+function lawSourced(report: LawReport): SourcedValue[] {
+  return [
+    ...sourcedNumber(report.violations.length, 'compliance.law.violation_count'),
+    ...sourcedNumber(report.warnings.length, 'compliance.law.warning_count'),
+    ...sourcedNumber(report.results.length, 'compliance.law.check_count'),
+  ];
+}
+
 function canonSummary(canon: readonly CanonHit[]): ReviewOutcome['canon'] {
   return canon.map((hit) => ({
     chunk_id: hit.chunkId,
@@ -701,6 +757,14 @@ const getStatsTool: ChatTool = {
       );
     }
 
+    /* THE REFUSAL THAT USED TO BE A SOURCE.
+     *
+     * `unknown_lookup` carries `requested: "<the name the model typed>"` and a
+     * reason that quotes it again, and `invalid_params` itemises the model's own
+     * parameters back at it. Both are the right thing to SHOW — a model that
+     * cannot see which name it got wrong guesses again. Neither declares a
+     * sourced value, so `get_stats("followers_88123")` now puts 88123 in front
+     * of the model and nowhere near the linter. This is the executed attack. */
     if (!outcome.ok) {
       return toolResult(
         { tool: 'get_stats', ...outcome },
@@ -708,9 +772,31 @@ const getStatsTool: ChatTool = {
       );
     }
 
+    /* Hard rule 11 and hard rule 12 together: each value under the key that
+     * resolves it, and the sample size and observation date that travel WITH it
+     * declared in their own right — "average 508" is quotable only alongside
+     * "over 190 posts" if 190 is evidence too. */
+    const measured = outcome.result.values.flatMap((value) => [
+      { value: value.value, source_key: value.source_key },
+      ...sourcedNumber(value.n, `${value.source_key}.n`),
+      ...sourcedText(value.as_of, `${value.source_key}.as_of`),
+    ]);
+
     return toolResult(
       { tool: 'get_stats', ...outcome.result, grounding: 'data' satisfies Grounding },
-      { source_keys: outcome.result.values.map((value) => value.source_key) },
+      {
+        source_keys: outcome.result.values.map((value) => value.source_key),
+        sourced: [
+          ...measured,
+          ...sourcedText(
+            outcome.result.measured_over?.taken_on,
+            'performance.snapshot.taken_on',
+          ),
+          ...sourcedText(outcome.result.measured_over?.snapshot_id, 'performance.snapshot.id'),
+          ...sourcedNumber(outcome.result.coverage?.rows_fetched, 'performance.scan.rows_fetched'),
+          ...sourcedNumber(outcome.result.coverage?.limit, 'performance.scan.limit'),
+        ],
+      },
     );
   },
 };
@@ -810,6 +896,9 @@ const searchPostsTool: ChatTool = {
 
       const snapshot = (snapshotRes.data as { id: string; taken_on: string }[] | null)?.[0] ?? null;
       if (snapshot === null) {
+        // An absence sources nothing. The zeros below say "this read matched
+        // nothing", which is true of the read — they are not a measurement of
+        // the account, and rule 2 is that an absent quantity is an em-dash.
         return toolResult({
           tool: 'search_posts',
           rows: [],
@@ -883,17 +972,54 @@ const searchPostsTool: ChatTool = {
 
       const returned = ordered.slice(0, filters.limit).map(verbatim);
 
-      return toolResult({
-        tool: 'search_posts',
-        rows: returned,
-        matched: matched.length,
-        returned: returned.length,
-        filters,
-        coverage,
-        measured_over: { snapshot_id: snapshot.id, taken_on: snapshot.taken_on },
-        note: 'Rows are verbatim. A number inside a caption is text the client wrote, not a measurement — never state one as a metric.',
-        grounding: 'data' satisfies Grounding,
-      });
+      /* WHAT A ROW SOURCES, AND WHAT IT DOES NOT.
+       *
+       * The stored figures do: engagement, likes, comments, the id, the publish
+       * instant. A null likes count declares nothing, because it is not zero.
+       *
+       * `filters` DOES NOT, and that is the second executed attack. It is echoed
+       * in the payload so the model can see which filters actually applied —
+       * useful, and free — but `min_engagement` is an integer the MODEL chose,
+       * so a result repeating it is not evidence that anything equals it.
+       *
+       * NEITHER DOES `caption`. This tool's own description says it in terms: a
+       * number inside a caption is text the client wrote, not a measurement, and
+       * quoting one as a metric is the laundering the studio exists to prevent.
+       * Declaring caption prose as lint evidence would make the linter certify
+       * exactly that. Captions travel to the model in full; they simply cannot
+       * source a quantity. */
+      const rowValues = returned.flatMap((row) => [
+        ...sourcedText(row.ig_id),
+        ...sourcedNumber(row.engagement),
+        ...sourcedNumber(row.likes),
+        ...sourcedNumber(row.comments),
+        ...sourcedText(row.posted_at),
+      ]);
+
+      return toolResult(
+        {
+          tool: 'search_posts',
+          rows: returned,
+          matched: matched.length,
+          returned: returned.length,
+          filters,
+          coverage,
+          measured_over: { snapshot_id: snapshot.id, taken_on: snapshot.taken_on },
+          note: 'Rows are verbatim. A number inside a caption is text the client wrote, not a measurement — never state one as a metric.',
+          grounding: 'data' satisfies Grounding,
+        },
+        {
+          sourced: [
+            ...sourcedNumber(matched.length, 'posts.matched'),
+            ...sourcedNumber(returned.length, 'posts.returned'),
+            ...rowValues,
+            ...sourcedText(snapshot.taken_on, 'performance.snapshot.taken_on'),
+            ...sourcedText(snapshot.id, 'performance.snapshot.id'),
+            ...sourcedNumber(coverage.rows_fetched, 'performance.scan.rows_fetched'),
+            ...sourcedNumber(coverage.limit, 'performance.scan.limit'),
+          ],
+        },
+      );
     } catch (err) {
       const reason = err instanceof Error ? err.message : 'The search failed.';
       return toolResult(
@@ -960,15 +1086,23 @@ const getBrandTool: ChatTool = {
           });
         }
 
-        return toolResult({
-          tool: 'get_brand',
-          section,
-          version: guideline.version,
-          status: guideline.status,
-          created_at: guideline.created_at,
-          source: 'brand_guidelines (newest version)',
-          grounding: 'data' satisfies Grounding,
-        });
+        return toolResult(
+          {
+            tool: 'get_brand',
+            section,
+            version: guideline.version,
+            status: guideline.status,
+            created_at: guideline.created_at,
+            source: 'brand_guidelines (newest version)',
+            grounding: 'data' satisfies Grounding,
+          },
+          {
+            sourced: [
+              ...sourcedNumber(guideline.version, 'brand.guideline.version'),
+              ...sourcedText(guideline.created_at, 'brand.guideline.created_at'),
+            ],
+          },
+        );
       }
 
       const res = await deps.db.from('brand').select('*').eq('id', 1).maybeSingle();
@@ -990,59 +1124,99 @@ const getBrandTool: ChatTool = {
       }
 
       if (section === 'facts') {
-        return toolResult({
-          tool: 'get_brand',
-          section,
-          status: brand.status,
-          updated_at: brand.updated_at,
-          facts: brand.facts.map((fact) => ({
-            key: fact.key,
-            value: fact.value,
-            source: fact.source,
-            label_en: fact.label_en ?? null,
-            label_ar: fact.label_ar ?? null,
-          })),
-          count: brand.facts.length,
-          note:
-            brand.facts.length === 0
-              ? 'No fact has been recorded yet. That is an absence, not a client without facts.'
-              : 'Every fact carries the source it came from. Quote from here rather than from memory.',
-          grounding: 'data' satisfies Grounding,
-        });
+        return toolResult(
+          {
+            tool: 'get_brand',
+            section,
+            status: brand.status,
+            updated_at: brand.updated_at,
+            facts: brand.facts.map((fact) => ({
+              key: fact.key,
+              value: fact.value,
+              source: fact.source,
+              label_en: fact.label_en ?? null,
+              label_ar: fact.label_ar ?? null,
+            })),
+            count: brand.facts.length,
+            note:
+              brand.facts.length === 0
+                ? 'No fact has been recorded yet. That is an absence, not a client without facts.'
+                : 'Every fact carries the source it came from. Quote from here rather than from memory.',
+            grounding: 'data' satisfies Grounding,
+          },
+          {
+            // A verified fact IS evidence — it is stored, it carries its own
+            // source, and the description tells the model to quote from here
+            // rather than from memory. Each one under its own key.
+            sourced: [
+              ...brand.facts.flatMap((fact) =>
+                sourcedText(fact.value, `brand.facts.${fact.key}`),
+              ),
+              ...sourcedNumber(brand.facts.length, 'brand.facts.count'),
+              ...sourcedText(brand.updated_at, 'brand.updated_at'),
+            ],
+          },
+        );
       }
 
       if (section === 'voice') {
-        return toolResult({
-          tool: 'get_brand',
-          section,
-          examples: brand.voice_examples.map((example) => ({
-            text: example.text,
-            source_url: example.source_url,
-            // Null stays null: an example stored without an engagement figure has
-            // no engagement figure, it does not have zero.
-            engagement: example.engagement,
-          })),
-          count: brand.voice_examples.length,
-          note: "These are the client's own captions, verbatim. They are TEXT: a number inside one is something the client wrote, never a measurement you may state as a metric.",
-          grounding: 'data' satisfies Grounding,
-        });
+        return toolResult(
+          {
+            tool: 'get_brand',
+            section,
+            examples: brand.voice_examples.map((example) => ({
+              text: example.text,
+              source_url: example.source_url,
+              // Null stays null: an example stored without an engagement figure has
+              // no engagement figure, it does not have zero.
+              engagement: example.engagement,
+            })),
+            count: brand.voice_examples.length,
+            note: "These are the client's own captions, verbatim. They are TEXT: a number inside one is something the client wrote, never a measurement you may state as a metric.",
+            grounding: 'data' satisfies Grounding,
+          },
+          {
+            // The stored engagement figure sources itself. THE CAPTION DOES NOT
+            // — the note above says why, and declaring it here would contradict
+            // the note in the one place that has teeth.
+            sourced: [
+              ...brand.voice_examples.flatMap((example) => sourcedNumber(example.engagement)),
+              ...sourcedNumber(brand.voice_examples.length, 'brand.voice_examples.count'),
+            ],
+          },
+        );
       }
 
       // section === 'palette'
-      return toolResult({
-        tool: 'get_brand',
-        section,
-        // Names only. A hex in client copy is a Law violation, so handing the
-        // generator the hexes would be handing it the violation.
-        swatch_names: Object.keys(brand.palette?.swatches ?? {}),
-        note_from_brand: brand.palette?.note ?? null,
-        typography: brand.typography,
-        withheld: {
-          palette_hex_values:
-            'names are returned instead; a raw hex written into copy fails the Law.',
+      return toolResult(
+        {
+          tool: 'get_brand',
+          section,
+          // Names only. A hex in client copy is a Law violation, so handing the
+          // generator the hexes would be handing it the violation.
+          swatch_names: Object.keys(brand.palette?.swatches ?? {}),
+          note_from_brand: brand.palette?.note ?? null,
+          typography: brand.typography,
+          withheld: {
+            palette_hex_values:
+              'names are returned instead; a raw hex written into copy fails the Law.',
+          },
+          grounding: 'data' satisfies Grounding,
         },
-        grounding: 'data' satisfies Grounding,
-      });
+        {
+          // The typefaces as recorded. A weight or a size inside one of these
+          // strings is stored brand data, so it may be quoted.
+          sourced: [
+            ...sourcedText(brand.typography?.arabic_display, 'brand.typography.arabic_display'),
+            ...sourcedText(brand.typography?.arabic_body, 'brand.typography.arabic_body'),
+            ...sourcedText(brand.typography?.latin, 'brand.typography.latin'),
+            ...sourcedNumber(
+              Object.keys(brand.palette?.swatches ?? {}).length,
+              'brand.palette.swatch_count',
+            ),
+          ],
+        },
+      );
     } catch (err) {
       const reason = err instanceof Error ? err.message : 'The read failed.';
       return toolResult(
@@ -1180,6 +1354,11 @@ const runComplianceTool: ChatTool = {
           note: 'The Law ran and is complete. Only the model-backed Judge was refused.',
         },
         {
+          // The cap figures ARE evidence and the description says so: "the
+          // payload names the cap, what used it, and the instant it resets" —
+          // the model is meant to relay them. Same list ./dispatch.ts refuses
+          // with, imported rather than restated.
+          sourced: [...capSourcedValues(cap), ...lawSourced(law)],
           card: {
             kind: 'compliance',
             tool: 'run_compliance',
@@ -1250,6 +1429,16 @@ const runComplianceTool: ChatTool = {
         grounding: 'data' satisfies Grounding,
       },
       {
+        // The Judge's verdict is model prose about model-supplied text, so it
+        // is not here either — only the counts, the ledger row this call
+        // created, and the cap it was measured against.
+        sourced: [
+          ...lawSourced(outcome.law),
+          ...sourcedNumber(outcome.canon.length, 'compliance.canon.count'),
+          ...sourcedText(recorded?.id, 'compliance.recorded.id'),
+          ...sourcedText(recorded?.created_at, 'compliance.recorded.created_at'),
+          ...capSourcedValues(cap),
+        ],
         card: {
           kind: 'compliance',
           tool: 'run_compliance',
@@ -1515,6 +1704,11 @@ export function createChatToolExecutor(
 ): (call: ChatToolCallRecord) => Promise<ChatToolResult> {
   return async (call) => {
     if (!isChatToolName(call.name)) {
+      /* `call.name` IS A STRING THE MODEL WROTE. Saying it back is good UX —
+       * the model can see it invented a tool and pick a real one — and it is
+       * the third of the executed echoes: `get_stats_88123` would have put
+       * 88123 into the lint context by being refused. `toolResult` declares no
+       * sourced value here, so it now puts it nowhere. */
       const reason =
         `There is no tool called "${call.name}". This surface exposes exactly ` +
         `${CHAT_TOOL_NAMES.length}: ${CHAT_TOOL_NAMES.join(', ')}.`;

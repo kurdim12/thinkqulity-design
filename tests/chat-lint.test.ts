@@ -17,6 +17,7 @@ import type {
   ChatTransportRequest,
   ChatWireMessage,
 } from '../src/lib/agent/chat/run.ts';
+import type { ChatToolDeps } from '../src/lib/agent/chat/tools.ts';
 
 /* =============================================================== what this ==
  * HARD RULE 16 — chat never renders an unsourced number — is not a prompt line
@@ -46,6 +47,22 @@ import type {
  *   - history is windowed by code truncation — no model call summarises
  *     anything.
  *
+ * AND THE TWO DEFECTS THIS FILE WAS EXTENDED TO CLOSE, both replayed as the
+ * attacks that were actually executed against the running gate:
+ *
+ *   - THE MODEL CANNOT WRITE ITS OWN SOURCES. Four tools echo a model-supplied
+ *     string back inside their refusal, and all four refusals are free — no
+ *     spend, no write — so a model could invent a lookup name containing the
+ *     figure it wanted, be refused, and cite the refusal. Each of the four is
+ *     replayed here through the REAL executor, and each must end with the
+ *     number cut out. The fifth-echo guard is the test that stops this fix
+ *     rotting: a tool that declares no sourced values contributes nothing,
+ *     so an echo added later fails closed instead of reopening the hole.
+ *   - A CLAIM IS SOURCED BY A WHOLE TOKEN, NOT A SUBSTRING. `508` used to lint
+ *     clean against `ig_id: 1750899508`. Both the attack and its true-positive
+ *     control are here, because a check that stopped finding real numbers
+ *     would be a worse bug than the one it replaced.
+ *
  * WHAT IS NOT PROVEN HERE:
  *   whether a real model repairs a draft when asked to. That is a claim about a
  *   model and no key is usable in this repository. What is proven is that a
@@ -62,9 +79,25 @@ import type {
 const SRC = new URL('../src/', import.meta.url).href;
 
 const AUTH_STUB = 'stub:lib-auth';
+const DB_STUB = 'stub:lib-supabase-admin';
+const AGENT_STUB = 'stub:lib-agent-client';
 
+/**
+ * Three stubs, and the last two exist so THE REAL TOOLS can be driven here.
+ *
+ * The laundering attacks below are replayed through `createChatToolExecutor` —
+ * the production executor, the production refusals — because a fake tool that
+ * merely resembled a refusal would prove nothing about the tools that were
+ * actually exploited. Importing it pulls in the Supabase admin client and the
+ * feature registry's model client, neither of which can be constructed in this
+ * repository, so both are swapped for stubs exactly as tests/chat-tools.test.ts
+ * does. The model client's stub THROWS: no tool on any path below may reach a
+ * model, and if one did this would say so rather than hang.
+ */
 const STUBS: Record<string, string> = {
   '@/lib/auth': AUTH_STUB,
+  '@/lib/supabase/admin': DB_STUB,
+  '@/lib/agent/client': AGENT_STUB,
 };
 
 const STUB_SOURCE: Record<string, string> = {
@@ -77,6 +110,16 @@ const STUB_SOURCE: Record<string, string> = {
     '    this.hint = hint;' +
     '  }' +
     '}',
+  [DB_STUB]:
+    'export function supabaseAdmin() {' +
+    '  throw new Error("chat-lint.test.ts: no tool here may build a database client.");' +
+    '}',
+  [AGENT_STUB]:
+    'export async function runAgentJson() {' +
+    '  throw new Error("chat-lint.test.ts: a model call escaped the injected transport.");' +
+    '}' +
+    'export function modelFor() { return "stub — no model was called"; }' +
+    'export function resolveProvider() { return "openrouter"; }',
 };
 
 function tsFile(base: string): string | null {
@@ -115,10 +158,15 @@ const {
   CHAT_MAX_TOKENS,
   HISTORY_TOKEN_BUDGET,
   UNSOURCED_CHIP,
+  lintEvidence,
   runAgentChat,
   stripUnsourcedNumbers,
   windowHistory,
 } = await import('../src/lib/agent/chat/run.ts');
+
+const { chatToolSpecs, createChatToolExecutor } = await import(
+  '../src/lib/agent/chat/tools.ts'
+);
 
 /* --------------------------------------------------------------- fixture -- */
 
@@ -181,6 +229,82 @@ test('the fixture is a real trap: the invented number appears nowhere in the blo
   assert.ok(BLOCKS.includes('508'));
   assert.ok(BLOCKS.includes('96520'));
 });
+
+/* ------------------------------------------------ the executed attack values --
+ *
+ * 88123 is the figure the laundering proof used: with `profile_snapshots` EMPTY,
+ * the gate delivered "عدد متابعي حساب الأكاديمية 88123" carrying a source key,
+ * passed: true, stripped: []. No row in this deployment has ever held it, which
+ * is exactly what makes it the right probe.
+ *
+ * 1750899508 is the Instagram id from the substring proof, and 899 is a slice of
+ * its middle — a number that is nowhere in the blocks and is not a quantity
+ * anybody measured, but that the old `context.includes()` would have found.
+ * ------------------------------------------------------------------------ */
+
+const LAUNDERED = '88123';
+const IG_ID = '1750899508';
+const INSIDE_IG_ID = '899';
+
+test('the attack values are real traps: none of them is in the blocks', () => {
+  assert.equal(BLOCKS.includes(LAUNDERED), false);
+  assert.equal(BLOCKS.includes(INSIDE_IG_ID), false);
+  assert.equal(BLOCKS.includes(IG_ID), false);
+  // And the slice really is a slice, or the substring test proves nothing.
+  assert.ok(IG_ID.includes(INSIDE_IG_ID));
+});
+
+/* --------------------------------------------------------- the fake database --
+ *
+ * ONE snapshot and NO posts — the honest state of a filter that matched nothing,
+ * and the reason no post figure is invented anywhere in this file. It answers
+ * the two reads `search_posts` makes and nothing else; every other table comes
+ * back empty, which is what this deployment holds.
+ * ------------------------------------------------------------------------ */
+
+interface DbAnswer {
+  data: unknown;
+  error: { message: string } | null;
+}
+
+type DbChain = Promise<DbAnswer> & {
+  select: () => DbChain;
+  eq: () => DbChain;
+  order: () => DbChain;
+  limit: () => DbChain;
+};
+
+function dbChain(answer: DbAnswer): DbChain {
+  const self = Promise.resolve(answer) as DbChain;
+  self.select = () => self;
+  self.eq = () => self;
+  self.order = () => self;
+  self.limit = () => self;
+  return self;
+}
+
+const TABLES: Record<string, DbAnswer> = {
+  snapshots: { data: [{ id: 'snap-1', taken_on: SNAPSHOT_DAY }], error: null },
+  posts: { data: [], error: null },
+};
+
+const fakeDb = {
+  from: (table: string) => dbChain(TABLES[table] ?? { data: [], error: null }),
+};
+
+/** Stands in for a SupabaseClient at the one call shape these reads use. */
+const db = fakeDb as unknown as ChatToolDeps['db'];
+
+/** The production executor, over that database. Nothing about it is faked. */
+function realTools(): {
+  tools: ChatToolSpec[];
+  executeTool: ReturnType<typeof createChatToolExecutor>;
+} {
+  return {
+    tools: chatToolSpecs(),
+    executeTool: createChatToolExecutor({ db, quality: 'standard' }),
+  };
+}
 
 /* ---------------------------------------------------------- the fake model -- */
 
@@ -424,6 +548,13 @@ test('a number sourced by a TOOL RESULT passes, so the context is both halves', 
       assert.equal(asked.name, 'get_stats');
       return {
         content: `[performance.personal.top_post.engagement] = "${TOP_POST}"`,
+        // THE DECLARED HALF. `content` is what the model reads; this is what the
+        // linter reads, and only this. A tool result that carried the figure in
+        // its prose alone would now source nothing — which is the fifth-echo
+        // guard further down, asserted here from the passing side.
+        sourced: [
+          { value: TOP_POST, source_key: 'performance.personal.top_post.engagement' },
+        ],
         source_keys: ['performance.personal.top_post.engagement'],
       };
     },
@@ -555,6 +686,252 @@ test('history is windowed by code truncation — nothing is summarised by a mode
   ];
   const whole = windowHistory(short, HISTORY_TOKEN_BUDGET);
   assert.deepEqual(whole, { turns: short, dropped: 0, truncated: false });
+});
+
+/* ================================================ defect 1: the four echoes ==
+ *
+ * Each attack is the same three moves, so they are driven by one helper and
+ * differ only in the tool call — which is the point: the fix is one rule applied
+ * to every tool, not four patches.
+ *
+ *   1. The model calls a REAL tool with a model-written string carrying 88123.
+ *   2. The real refusal comes back, quoting that string. It still does — the
+ *      refusal text is good UX and the model should see it.
+ *   3. The model cites 88123 with a plausible source key, twice, so the one
+ *      repair is spent and the stripper has to act.
+ *
+ * The assertions are made in both directions on purpose. The refusal MUST still
+ * contain the digits (or the attack is not being replayed at all) and the lint
+ * evidence MUST NOT (or it is not being stopped).
+ * ========================================================================== */
+
+async function laundering(call: ChatToolCallRecord): Promise<{
+  refusal: string;
+  evidence: string;
+  reply: string;
+  stripped: string[];
+}> {
+  const cited = `عدد متابعي حساب الأكاديمية ${LAUNDERED} [profiles.academy.followers].`;
+  const model = fakeModel([{ text: '', toolCalls: [call] }, { text: cited }, { text: cited }]);
+  const { tools, executeTool } = realTools();
+
+  const outcome = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'كم عدد المتابعين؟',
+    quality: 'standard',
+    tools,
+    executeTool,
+    transport: model.transport,
+  });
+
+  assert.equal(outcome.tools.length, 1, 'the tool really ran');
+  return {
+    refusal: outcome.tools[0].result.content,
+    evidence: lintEvidence(outcome.tools[0].result),
+    reply: outcome.reply,
+    stripped: outcome.law_report.stripped,
+  };
+}
+
+function assertLaundered(
+  outcome: { refusal: string; evidence: string; reply: string; stripped: string[] },
+  where: string,
+): void {
+  assert.ok(
+    outcome.refusal.includes(LAUNDERED),
+    `${where}: the refusal must still echo the number, or this test is vacuous`,
+  );
+  assert.equal(
+    outcome.evidence.includes(LAUNDERED),
+    false,
+    `${where}: the echoed number reached the lint context`,
+  );
+  assert.deepEqual(outcome.stripped, [LAUNDERED], `${where}: the number was not cut out`);
+  assert.equal(outcome.reply.includes(LAUNDERED), false, `${where}: the number was delivered`);
+  assert.ok(outcome.reply.includes(UNSOURCED_CHIP), `${where}: no chip stands in its place`);
+}
+
+test('LAUNDERING 1 — an invented get_stats lookup name cannot source its own digits', async () => {
+  // The executed proof, exactly: an unknown lookup is refused BY NAME, and the
+  // name was written by the model.
+  const outcome = await laundering({
+    id: 'call_1',
+    name: 'get_stats',
+    arguments: `{"lookup":"followers_${LAUNDERED}"}`,
+  });
+  assert.match(outcome.refusal, /unknown_lookup/);
+  assertLaundered(outcome, 'get_stats');
+});
+
+test('LAUNDERING 2 — a search_posts filter cannot source the integer the model chose', async () => {
+  // min_engagement passes validation, so this is not even a refusal: it is a
+  // SUCCESSFUL call whose result echoes the filters it applied.
+  const outcome = await laundering({
+    id: 'call_1',
+    name: 'search_posts',
+    arguments: `{"min_engagement":${LAUNDERED}}`,
+  });
+  assert.match(outcome.refusal, /"min_engagement": 88123/);
+  assert.match(outcome.refusal, /"matched": 0/, 'nothing matched, and it says so');
+  assertLaundered(outcome, 'search_posts');
+});
+
+test('LAUNDERING 3 — an invented tool name cannot source its own digits', async () => {
+  const outcome = await laundering({
+    id: 'call_1',
+    name: `get_followers_${LAUNDERED}`,
+    arguments: '{}',
+  });
+  assert.match(outcome.refusal, /unknown_tool/);
+  assertLaundered(outcome, 'unknown tool');
+});
+
+test('LAUNDERING 4 — a refused dispatch feature cannot source its own digits', async () => {
+  const outcome = await laundering({
+    id: 'call_1',
+    name: 'dispatch_feature',
+    arguments: `{"feature":"followers_${LAUNDERED}"}`,
+  });
+  assert.match(outcome.refusal, /dispatch_invalid_arguments/);
+  assertLaundered(outcome, 'dispatch_feature');
+});
+
+test('a real tool result still sources its own measured values — the fix is not a mute button', async () => {
+  // The other direction. `search_posts` over an empty population still declares
+  // what it measured, so the model may state those figures. If this fails, the
+  // split has been implemented as "tool results are never evidence", which
+  // would satisfy every attack above and break the product.
+  const { executeTool } = realTools();
+  const result = await executeTool({
+    id: 'call_1',
+    name: 'search_posts',
+    arguments: '{"account":"academy"}',
+  });
+
+  const evidence = lintEvidence(result);
+  assert.notEqual(evidence, '', 'a successful read declares something');
+  assert.match(evidence, /performance\.snapshot\.taken_on/, 'keyed, per hard rule 12');
+  assert.ok(evidence.includes(SNAPSHOT_DAY), 'the snapshot date it measured over');
+  assert.match(evidence, /\[posts\.matched\] = "0"/);
+});
+
+/* ============================================ defect 2: whole-token matching ==*/
+
+test('the substring attack: a number found only inside an id is not sourced', async () => {
+  // The executed proof, at the linter: the only 508 in this context is the tail
+  // of an Instagram id, and an id is not a measurement of anything.
+  assert.equal(claimsLinter('المعدل 508 لكل منشور.', `ig_id: ${IG_ID}`).passed, false);
+
+  // THE TRUE-POSITIVE CONTROL. The same claim against a real 508 token passes,
+  // so the check got stricter without getting blind.
+  assert.equal(
+    claimsLinter(
+      'المعدل 508 لكل منشور.',
+      '[performance.personal.avg_engagement] mean engagement per post (n=190) = "508"',
+    ).passed,
+    true,
+  );
+
+  // And the same attack through the whole gate, with the id declared by a tool
+  // exactly as `search_posts` declares one. 899 is inside the id and nowhere
+  // else; the id itself is sourced and must survive.
+  const draft = `أقوى منشور ${IG_ID} حقق ${INSIDE_IG_ID} تفاعل [posts.engagement].`;
+  const model = fakeModel([
+    { text: '', toolCalls: [{ id: 'call_1', name: 'search_posts', arguments: '{}' }] },
+    { text: draft },
+    { text: draft },
+  ]);
+
+  const outcome = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'أقوى منشور؟',
+    quality: 'standard',
+    tools: [
+      {
+        name: 'search_posts',
+        description: 'Returns real posts, verbatim.',
+        parameters: { type: 'object', properties: {}, required: [] },
+      },
+    ],
+    executeTool: async () => ({
+      content: `rows: [{ "ig_id": "${IG_ID}" }]`,
+      sourced: [{ value: IG_ID }],
+    }),
+    transport: model.transport,
+  });
+
+  assert.deepEqual(outcome.law_report.stripped, [INSIDE_IG_ID], 'the slice was cut out');
+  assert.ok(outcome.reply.includes(IG_ID), 'the whole id sources itself and survives');
+  assert.ok(outcome.reply.includes(UNSOURCED_CHIP));
+  assert.equal(outcome.law_report.passed, true, 'what is delivered passes the linter');
+});
+
+/* ================================================= the guard against rotting ==*/
+
+test('FIFTH ECHO — a new tool that returns an unsplit string contributes nothing', async () => {
+  /* This is the test that stops the fix rotting.
+   *
+   * The four attacks above are closed by four declarations. This one is closed
+   * by the DEFAULT: a tool nobody has thought about yet, whose result is a
+   * sentence with a number in it and no `sourced` half, is not evidence for that
+   * number. Whoever adds the sixth tool has to declare what it measured before
+   * the model may state it — forgetting fails closed. */
+  const echoTool: ChatToolSpec = {
+    name: 'get_follower_count',
+    description: 'A tool added later, by someone who has not read this file.',
+    parameters: { type: 'object', properties: {}, required: [] },
+  };
+  const cited = `عدد المتابعين ${LAUNDERED} [profiles.academy.followers].`;
+
+  const unsplit = fakeModel([
+    { text: '', toolCalls: [{ id: 'call_1', name: 'get_follower_count', arguments: '{}' }] },
+    { text: cited },
+    { text: cited },
+  ]);
+
+  const leaked = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'كم عدد المتابعين؟',
+    quality: 'standard',
+    tools: [echoTool],
+    executeTool: async () => ({ content: `total_followers = ${LAUNDERED}` }),
+    transport: unsplit.transport,
+  });
+
+  assert.ok(
+    leaked.tools[0].result.content.includes(LAUNDERED),
+    'the model was shown the number',
+  );
+  assert.equal(lintEvidence(leaked.tools[0].result), '', 'and it sourced nothing at all');
+  assert.deepEqual(leaked.law_report.stripped, [LAUNDERED]);
+  assert.ok(leaked.reply.includes(UNSOURCED_CHIP));
+
+  // The SAME tool, having declared the value, sources it. The difference between
+  // the two halves of this test is one field, and that is the whole mechanism.
+  const declared = fakeModel([
+    { text: '', toolCalls: [{ id: 'call_1', name: 'get_follower_count', arguments: '{}' }] },
+    { text: cited },
+  ]);
+
+  const sourced = await runAgentChat({
+    data: chatData(),
+    history: [],
+    message: 'كم عدد المتابعين؟',
+    quality: 'standard',
+    tools: [echoTool],
+    executeTool: async () => ({
+      content: `total_followers = ${LAUNDERED}`,
+      sourced: [{ value: LAUNDERED, source_key: 'profiles.academy.followers' }],
+    }),
+    transport: declared.transport,
+  });
+
+  assert.equal(sourced.law_report.repaired, false);
+  assert.deepEqual(sourced.law_report.stripped, []);
+  assert.equal(sourced.reply, cited, 'delivered byte-for-byte');
 });
 
 test('the stripper leaves text alone when nothing was flagged', () => {

@@ -12,7 +12,7 @@ import {
 } from '@/lib/mcp/tools';
 import type { Quality } from '@/lib/prefs';
 import type { Grounding, ChatToolCallRecord } from '@/lib/types/db';
-import type { ChatToolResult, ChatToolSpec, ToolParameterSchema } from './run';
+import type { ChatToolResult, ChatToolSpec, SourcedValue, ToolParameterSchema } from './run';
 
 /**
  * ===========================================================================
@@ -232,6 +232,33 @@ export async function readChatCapState(now: Date = new Date()): Promise<ChatCapS
       'chat_cap.reserved': 'mcp_cap_days.reserved_units for chat_cap.amman_day',
     },
   };
+}
+
+/**
+ * The cap, as lint evidence — the figures an operator may be told, each under
+ * the key `ChatCapState.source_keys` already names it by.
+ *
+ * Exported because ./tools.ts refuses under the SAME cap and must quote the SAME
+ * numbers. Two lists that nearly agreed would be two ceilings on one screen.
+ *
+ * WHAT IS ABSENT IS THE POINT: `requested`. That figure comes from the model's
+ * own `input.count`, and a refusal repeating it back is not a measurement of
+ * anything — it is the model's number wearing the tool's voice.
+ */
+export function capSourcedValues(cap: ChatCapState): SourcedValue[] {
+  return [
+    { value: String(cap.limit), source_key: 'chat_cap.limit' },
+    { value: String(cap.used), source_key: 'chat_cap.used' },
+    { value: String(cap.remaining), source_key: 'chat_cap.remaining' },
+    { value: cap.window_start, source_key: 'chat_cap.window_start' },
+    { value: cap.resets_at, source_key: 'chat_cap.resets_at' },
+    { value: cap.resets_on, source_key: 'chat_cap.resets_on' },
+    { value: cap.amman_day, source_key: 'chat_cap.amman_day' },
+    ...Object.entries(cap.counted).map(([table, count]) => ({
+      value: String(count),
+      source_key: `chat_cap.counted.${table}`,
+    })),
+  ];
 }
 
 /* ==================================================== the reservation client */
@@ -676,15 +703,20 @@ export const DISPATCH_FAILED = 'dispatch_failed';
  * A refusal is a TOOL RESULT, not a thrown error.
  *
  * Two reasons, and both are rules. Rule 18 asks for a STRUCTURED refusal, so it
- * is JSON a caller can branch on rather than a sentence to regex. And ./run.ts
- * feeds every tool result into the lint context, so a refusal that names the cap
- * and the reset instant is a SOURCE for those values — the model may quote them
- * to the operator and the claims-linter will pass them. A refusal thrown as an
- * exception would reach the operator as prose the linter would then have to
- * strip numbers out of.
+ * is JSON a caller can branch on rather than a sentence to regex. And a refusal
+ * that names the cap and the reset instant should be a SOURCE for those values,
+ * so the model may quote them to the operator and the claims-linter will pass
+ * them. A refusal thrown as an exception would reach the operator as prose the
+ * linter would then have to strip numbers out of.
+ *
+ * `sourced` IS A SEPARATE ARGUMENT, not read off the payload. The payload is for
+ * the model and carries whatever helps it explain itself — including, in
+ * `DISPATCH_INVALID` below, the feature name the model asked for. The evidence
+ * is only what this module computed, and defaults to NOTHING: a refusal that
+ * forgets to pass this list sources no number rather than all of them.
  */
-function refusal(payload: Record<string, unknown>): ChatToolResult {
-  return { content: JSON.stringify(payload, null, 2) };
+function refusal(payload: Record<string, unknown>, sourced: SourcedValue[] = []): ChatToolResult {
+  return { content: JSON.stringify(payload, null, 2), sourced };
 }
 
 function capRefusal(cap: ChatCapState, requested: number, reserved_now: number | null): ChatToolResult {
@@ -713,7 +745,14 @@ function capRefusal(cap: ChatCapState, requested: number, reserved_now: number |
           'check-and-increment statement under a row lock, so simultaneous requests cannot ' +
           'each pass the same check.',
     grounding: 'data' satisfies Grounding,
-  });
+  },
+  [
+    ...capSourcedValues(cap),
+    // What the ledger holds for the day. `requested` is deliberately not here.
+    ...(reserved_now === null
+      ? []
+      : [{ value: String(reserved_now), source_key: 'chat_cap.reserved' }]),
+  ]);
 }
 
 /* ============================================================ the tool spec */
@@ -861,6 +900,12 @@ export async function runDispatch(args: RunDispatchArgs): Promise<ChatToolResult
   const read = readRequest(args.call.arguments);
   if (!read.ok) {
     // Refused before the cap is even read: nothing ran, so nothing is charged.
+    //
+    // AND NOTHING IS SOURCED. `read.why` quotes the feature name back verbatim
+    // (`"followers_88123" is not a feature this chat can dispatch`) because the
+    // model needs to see what it got wrong — but a string the model wrote is
+    // not evidence for anything inside it, so no `sourced` list is passed and
+    // this result contributes nothing to the lint context.
     return refusal({
       refusal: DISPATCH_INVALID,
       tool: CHAT_DISPATCH_TOOL,
@@ -955,7 +1000,12 @@ export async function runDispatch(args: RunDispatchArgs): Promise<ChatToolResult
       reservation: reservationReport(reservation, settlement),
       cap,
       grounding: 'data' satisfies Grounding,
-    });
+    },
+    [
+      ...capSourcedValues(cap),
+      { value: String(settlement.units_released), source_key: 'chat_cap.units_released' },
+      { value: String(reservation.units), source_key: 'chat_cap.units_reserved' },
+    ]);
   }
 
   // The feature answered: the money is gone. Settled before the card is built,
@@ -1007,8 +1057,29 @@ export async function runDispatch(args: RunDispatchArgs): Promise<ChatToolResult
     'Add at most one line of framing. Do not restate, summarise or reconstruct its contents.',
   ].join('\n');
 
+  /**
+   * WHAT IS EVIDENCE HERE. Every entry below was produced by this dispatch: the
+   * feature's own row ids, the units the DATABASE granted (not the `count` the
+   * model asked for — that number only ever appears in a refusal, where it is
+   * not sourced), the token counts the provider reported, and the price derived
+   * from them. `est_usd` is omitted when it is null rather than sent as zero.
+   */
+  const sourced: SourcedValue[] = [
+    { value: String(persisted.ids.length), source_key: `dispatch.${feature}.artefacts_created` },
+    ...persisted.ids.map((id) => ({ value: id, source_key: `dispatch.${feature}.id` })),
+    { value: String(reservation.units), source_key: 'chat_cap.units_reserved' },
+    { value: String(reservation.reserved_after), source_key: 'chat_cap.reserved' },
+    { value: String(outcome.attempts), source_key: `dispatch.${feature}.attempts` },
+    { value: String(outcome.usage.input_tokens), source_key: `dispatch.${feature}.input_tokens` },
+    { value: String(outcome.usage.output_tokens), source_key: `dispatch.${feature}.output_tokens` },
+    ...(price.est_usd === null
+      ? []
+      : [{ value: String(price.est_usd), source_key: `dispatch.${feature}.est_usd` }]),
+  ];
+
   return {
     content,
+    sourced,
     source_keys: [`dispatch.${feature}`],
     card,
   };
