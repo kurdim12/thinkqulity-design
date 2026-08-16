@@ -429,6 +429,19 @@ const GLUE: readonly (readonly [string, string])[] = [
    * «508٬40» is 50 840 to the reader, spelled as two honest placeholders. */
   ['U+066C ARABIC THOUSANDS SEPARATOR (Po)', ARABIC_THOUSANDS],
   ['U+002C COMMA (Po)', ','],
+  /* FIX 1's rows. Measured in real Chrome under the chat surface's own CSS
+   * (`white-space: pre-wrap`), against the baseline "50840" = 40.44px — see
+   * src/lib/brain/substitute.ts where HARD_LINE_BREAK is declared. None of
+   * these six breaks a line under that CSS, so none of them may grant
+   * separation on that basis; the old LINE_BREAK-wide rule got exactly these
+   * six wrong, because it asked "does this end a line" for a purpose
+   * (`atLineStart`'s ordinal exception) that is not this question. */
+  ['U+000C FORM FEED (Cc) — 40.44px, identical width to "50840"', "\f"],
+  ['U+000D CARRIAGE RETURN alone (Cc) — 40.44px, identical width to "50840"', "\r"],
+  ['U+2028 LINE SEPARATOR (Zl) — 44.55px, same width as a SPACE', " "],
+  ['U+2029 PARAGRAPH SEPARATOR (Zp) — 44.55px, same width as a SPACE', " "],
+  ['U+0085 NEXT LINE (Cc) — 50.13px, no line break', ""],
+  ['U+000B LINE TABULATION (Cc) — 50.13px, no line break', "\u000b"],
 ];
 
 test('BREAK 1 EXECUTED: two honest placeholders glued by U+034F deliver 50840', () => {
@@ -478,7 +491,7 @@ const SEPARATION: readonly (readonly [string, string])[] = [
   ['a single Arabic letter', ' و '],
   ['U+060C ARABIC COMMA (a list mark, never a digit group)', '، '],
   ['a newline', '\n'],
-  ['U+2028 LINE SEPARATOR', '\u2028'],
+  ['a CRLF pair (contains U+000A)', '\r\n'],
   ['an em dash (Pd)', ' — '],
   ['a solidus (Po)', ' / '],
   ['a plus sign (Sm)', ' + '],
@@ -540,6 +553,51 @@ test('CONTROL a grouping separator that really groups is caught by POSITION, not
   assert.equal(result.deliverable, false);
   assert.deepEqual(kindsOf(result), ['glued-value']);
   assert.deepEqual(rawsOf(result), ['190,508']);
+});
+
+/* ========================================================================= */
+/* 4c. FIX 2 — THE SWISS / ISO-31-0 / BRITISH DIGIT-GROUP SEPARATORS         */
+/*                                                                           */
+/* FIGURE_INTERNAL used to name only the tokeniser's own four characters, so */
+/* the three rows below rendered a reader-visible thousands group and       */
+/* shipped: `separatesFigures()` saw a genuine glyph, did not recognise it   */
+/* as a group mark, and called it separation.                               */
+/* ========================================================================= */
+
+const DIGIT_GROUP: readonly (readonly [string, string])[] = [
+  ["U+0027 APOSTROPHE — the Swiss group mark: 1'234'567", "'"],
+  ['U+2019 RIGHT SINGLE QUOTATION MARK — the "smart quote" spelling of the same mark', '’'],
+  ['U+00B7 MIDDLE DOT — the ISO 31-0 / older British group mark: 1·234·567', '·'],
+];
+
+for (const [name, mark] of DIGIT_GROUP) {
+  test(`FIX 2 ${name} does not separate two substituted values`, () => {
+    const result = run(
+      '{{performance.personal.avg_engagement}}' +
+        `${mark}{{performance.academy.avg_engagement}}`,
+    );
+
+    assert.equal(result.final, `508${mark}40`);
+    assert.equal(
+      result.deliverable,
+      false,
+      `"508${mark}40" was delivered — ${name} let two values read as one figure`,
+    );
+    assert.deepEqual(kindsOf(result), ['glued-value']);
+  });
+}
+
+test('FIX 2 CONTROL — U+060C ARABIC COMMA is a list mark, not a digit group, and still separates', () => {
+  /* The nearest character to the three above that must NOT be swept in: a
+   * comma-shaped mark that a reader never reads as grouping digits, so it has
+   * to keep separating two figures exactly as it did before FIX 2. */
+  const result = run(
+    '{{performance.personal.avg_engagement}}، {{performance.academy.avg_engagement}}',
+  );
+
+  assert.equal(result.final, '508، 40');
+  assert.equal(result.deliverable, true);
+  assert.deepEqual([...result.violations], []);
 });
 
 /* ========================================================================= */
@@ -832,7 +890,7 @@ test('CONTROL every GLUE row is one code point, and it is the one its name claim
    * that had quietly become an ordinary space would pass its own test for the
    * wrong reason and prove nothing about the character it names. */
   const NAMED = /^U\+([0-9A-F]{4}) /u;
-  const LINE_BREAK = /[\n\r\u2028\u2029\u0085\u000B\u000C]/u;
+  const HARD_LINE_BREAK = /\n/u;
 
   for (const [name, glue] of GLUE) {
     assert.equal([...glue].length, 1, `${name} is not a single code point`);
@@ -849,7 +907,7 @@ test('CONTROL every GLUE row is one code point, and it is the one its name claim
     /* No row is a line break: a line break is the one blank that DOES
      * separate, so a stray one here would make its row pass for a reason the
      * row was not written to test. */
-    assert.equal(LINE_BREAK.test(glue), false, `${name} is a line break`);
+    assert.equal(HARD_LINE_BREAK.test(glue), false, `${name} is a line break`);
   }
 });
 
@@ -862,7 +920,15 @@ test('CONTROL the OLD rule really was blind to these, which is why it opened', (
    * called every one of them separation and let two substituted values stand as
    * one figure. Fifteen is not a bug count; it is the size of the enumeration
    * gap on the day it was measured, and the next Unicode release makes it
-   * bigger. The inverted rule has no such number to grow. */
+   * bigger. The inverted rule has no such number to grow.
+   *
+   * The six FIX-1 rows — the ones that end a line by the old, over-wide
+   * LINE_BREAK class but do not actually break one under `pre-wrap` — sit on
+   * the OTHER side of this control: the old class already matched them as
+   * blank, same as every space, so they were not a NEW enumeration gap. What
+   * was wrong about them was not the enumerating rule; it was that
+   * `separatesFigures()` used to ask a second, unrelated question — "does this
+   * end a line" — and answer it with the same over-wide class. */
   const OLD_BLANK_RUN = /^[\s\p{Cf}\p{Cc}]*$/u;
 
   const missed = GLUE.filter(([, glue]) => !OLD_BLANK_RUN.test(glue));
@@ -873,9 +939,10 @@ test('CONTROL the OLD rule really was blind to these, which is why it opened', (
   );
   assert.equal(OLD_BLANK_RUN.test(CGJ), false, 'U+034F is the round-3 door, by name');
 
-  /* And it held the ten blanks — which is why the blanks are rows too: the
-   * inverted rule must keep everything the enumerating rule already held. */
-  assert.equal(GLUE.filter(([, glue]) => OLD_BLANK_RUN.test(glue)).length, 10);
+  /* And it held the sixteen blanks — the original ten, plus the six FIX-1 rows,
+   * which is why the blanks are rows too: the inverted rule must keep
+   * everything the enumerating rule already held. */
+  assert.equal(GLUE.filter(([, glue]) => OLD_BLANK_RUN.test(glue)).length, 16);
 
   /* Every SEPARATION row is the opposite: something in it draws. Asserted
    * through the same categories the engine admits, so this control fails if a

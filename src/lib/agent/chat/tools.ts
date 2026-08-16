@@ -1711,14 +1711,20 @@ async function runDispatchTool(
  * leaf module the screen imports too, so there is no mirrored string here.
  *
  * ---------------------------------------------------------------------------
- * WIRING — DELIBERATELY NOT DONE HERE
+ * WIRING — FIX 4
  * ---------------------------------------------------------------------------
- * This module publishes the SPEC. It is not in `CHAT_TOOL_NAMES` below, so it is
- * not reachable from the running app and no model can call it yet. Wiring it
- * needs a `run` that reads `external_facts` through the caller's own client, and
- * that executor is not this task's to write. Adding the name without the handler
- * would not compile — `TOOLS` is total over the tuple — which is the registry
- * shape doing its job: a tool cannot be half-added.
+ * This module used to publish the SPEC only: absent from `CHAT_TOOL_NAMES`, so
+ * unreachable from the running app and uncallable by any model. That left rule
+ * 21's model-facing half governing nothing — an operator could write and read
+ * external facts on their own surface, but no model in this chat could ever see
+ * one. The executor is below, at "6b. get_external_facts (RUN)", built on
+ * `externalFactsResult()` and nothing else: every row this reads off
+ * `external_facts` already carries no `source_key` (see `ExternalFactRow` in
+ * src/lib/types/db.ts), and `externalFactsResult()`'s `sourced: never[]` refuses
+ * one from being minted on the way out, whatever the executor tried to attach.
+ * The name is now in `CHAT_TOOL_NAMES` below, and `TOOLS` being total over the
+ * tuple is what made that a single, compiler-checked edit rather than a
+ * half-added tool.
  * ========================================================================== */
 
 const EXTERNAL_TOPIC_MAX = 120;
@@ -1734,6 +1740,15 @@ export const getExternalFactsInput = z
 
 const GET_EXTERNAL_FACTS_DESCRIPTION = `Read claims that HAVE ALREADY BEEN RETRIEVED from the open web and filed, word for word, with the address they were published at and the moment they were read.
 
+WHEN TO USE IT
+- When the client or the operator asks what a third-party page, directory or article says about them or their market, and you want to check whether that has already been looked up.
+- To cite a named, dated, published claim as a claim — never to source a number.
+
+WHEN NOT TO USE IT
+- Do NOT call this expecting a fetch. It reads rows already filed; a topic nothing has been retrieved for comes back as an explicit absence, not an error, and that absence means "nobody has looked" — never "the web has nothing".
+- Do NOT state any figure a returned claim carries, in any script or spelling. There is no placeholder that resolves to a row here, so there is no way to write one that survives the gate.
+- Do NOT treat a claim marked about_client as a measurement of that account. This system measures its own accounts itself; a page disagreeing is at best stale.
+
 THIS TOOL CANNOT FETCH ANYTHING. It reads rows. Calling it never causes a request to leave this system, never costs money, and never counts against any cap. Retrieval is an operator's act on its own surface: if the answer is not already filed, the answer is that nobody has looked, and you should say so.
 
 WHAT COMES BACK IS NOT A MEASUREMENT, AND YOU MAY NOT TREAT IT AS ONE.
@@ -1743,7 +1758,20 @@ Every row is a sentence somebody else published. It carries a source_url and a r
   • You MAY say that a named source published something, and name the source and the date it was read. Say it as a claim: "the directory at <host> published a follower figure on <date>". Never as a fact about these accounts.
   • Where a row is marked about_client, this system MEASURES that thing itself. A page disagreeing with our own measurement is at best stale and at worst about somebody else. Say that the two disagree; do not average them, and do not prefer the page.
 
-An empty result means nothing has been retrieved for that topic. That is an answer — "we have not looked" — and it is different from "the web says nothing". Say which one you mean.`;
+An empty result means nothing has been retrieved for that topic. That is an answer — "we have not looked" — and it is different from "the web says nothing". Say which one you mean.
+
+PARAMETERS
+- topic (string, optional). Filters to claims filed under this topic. Matches rows that already exist; it is not a search query and it reaches nothing outside this database.
+- about_client (boolean, optional). Only claims flagged as being about one of the client's own accounts.
+- limit (integer, optional, 1 to 20). How many claims to return.
+
+REFUSAL SHAPES
+- "invalid_arguments" — the arguments did not match the schema above.
+- "tool_failed" — the read failed.
+There is no cap refusal: nothing here spends against any cap.
+
+SIDE EFFECTS
+None. One read, no model, no network request, no cost.`;
 
 /**
  * The tool as the provider publishes it. Kept next to the description so a
@@ -1855,6 +1883,112 @@ export type ExternalFactsExecutor = (
   deps: ChatToolDeps,
 ) => Promise<ExternalToolResult>;
 
+/* ============================================== 6b. get_external_facts (RUN) =
+ *
+ * FIX 4. `get_external_facts` was published above as a spec nothing could call:
+ * absent from `CHAT_TOOL_NAMES`, so rule 21's model-facing half governed
+ * nothing — an operator could write and read external facts on their own
+ * surface, but no model in this chat could ever see one. The same "careful
+ * machinery nothing calls" pattern this project has retired twice, now here.
+ *
+ * The rows this reads carry no `source_key` by construction — see
+ * `ExternalFactRow` in src/lib/types/db.ts — so this executor does not need to
+ * strip one; there is not one to strip. What it MUST NOT do is mint one on the
+ * way out, which is exactly what `externalFactsResult()` (and the
+ * `sourced: never[]` type behind it) refuses at compile time as well as at
+ * runtime. This function builds nothing by hand: every row is read, filtered
+ * and handed to that one constructor.
+ */
+
+/** A row shape narrow enough to read off `external_facts`, nothing invented. */
+interface ExternalFactRow {
+  claim: string;
+  source_url: string;
+  page_title: string | null;
+  retrieved_at: string;
+  topic: string;
+  kind: string;
+  confidence: string;
+  about_client: boolean;
+  client_account: string | null;
+  client_measure: string | null;
+}
+
+/**
+ * A scan cap, the same idiom \`MAX_POSTS_SCAN\` sets for \`search_posts\`: the
+ * read is a plain, bounded, unfiltered-at-Postgres select, and every filter —
+ * \`topic\`, \`about_client\` — is applied in code below over the returned rows.
+ * No model-supplied string ever reaches the database as part of a query.
+ */
+const EXTERNAL_FACTS_SCAN = 200;
+
+const runExternalFacts: ExternalFactsExecutor = async (args, deps) => {
+  const parsed = getExternalFactsInput.safeParse(args ?? {});
+  if (!parsed.success) {
+    const reason = 'The arguments did not match the schema for get_external_facts.';
+    return externalFactsResult(
+      { refusal: 'invalid_arguments', reason, issues: parsed.error.issues.map((issue) => issue.message) },
+      failureCard('get_external_facts', 'invalid_arguments', reason),
+    );
+  }
+  const { topic, about_client, limit } = parsed.data;
+
+  try {
+    const res = await deps.db
+      .from('external_facts')
+      .select(
+        'claim,source_url,page_title,retrieved_at,topic,kind,confidence,about_client,client_account,client_measure',
+      )
+      .order('retrieved_at', { ascending: false })
+      .limit(EXTERNAL_FACTS_SCAN);
+    if (res.error) throw new Error(`Could not read external_facts: ${res.error.message}`);
+
+    const scanned = (res.data as ExternalFactRow[] | null) ?? [];
+    const matched = scanned
+      .filter((row) => topic === undefined || row.topic === topic)
+      .filter((row) => about_client === undefined || row.about_client === about_client);
+    const rows = matched.slice(0, limit ?? EXTERNAL_LIMIT_MAX);
+
+    // WITHOUT source_key, by construction — the row it came off never carried
+    // one. Nothing here adds a field the row did not already have.
+    const facts = rows.map((row) => ({
+      claim: row.claim,
+      source_url: row.source_url,
+      page_title: row.page_title,
+      retrieved_at: row.retrieved_at,
+      topic: row.topic,
+      kind: row.kind,
+      confidence: row.confidence,
+      about_client: row.about_client,
+      client_account: row.client_account,
+      client_measure: row.client_measure,
+    }));
+
+    if (facts.length === 0) {
+      return externalFactsResult({
+        facts: [],
+        notes: ['(nothing retrieved) no filed claim matched this filter.'],
+      });
+    }
+
+    return externalFactsResult({ facts, matched: matched.length, returned: facts.length });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : 'The read failed.';
+    return externalFactsResult(
+      { refusal: 'tool_failed', reason },
+      failureCard('get_external_facts', 'tool_failed', reason),
+    );
+  }
+};
+
+const getExternalFactsTool: ChatTool = {
+  name: 'get_external_facts',
+  title: 'Read claims already retrieved from the open web',
+  description: GET_EXTERNAL_FACTS_DESCRIPTION,
+  parameters: externalFactsToolSpec().parameters,
+  run: runExternalFacts,
+};
+
 /* ================================================== the closed allow-list ====
  *
  * Five names, fixed at compile time. See the header for why this shape and not a
@@ -1866,6 +2000,7 @@ export const CHAT_TOOL_NAMES = [
   'search_posts',
   'get_brand',
   'run_compliance',
+  'get_external_facts',
   CHAT_DISPATCH_TOOL,
 ] as const;
 
@@ -1881,6 +2016,7 @@ const TOOLS: Record<Exclude<ChatToolName, typeof CHAT_DISPATCH_TOOL>, ChatTool> 
   search_posts: searchPostsTool,
   get_brand: getBrandTool,
   run_compliance: runComplianceTool,
+  get_external_facts: getExternalFactsTool,
 };
 
 /**

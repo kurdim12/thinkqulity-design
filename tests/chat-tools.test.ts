@@ -628,11 +628,15 @@ async function callTool(
 
 /* ====================================================== 1. the closed lists ==*/
 
-test('the surface is exactly five tools, and they are the tuple', () => {
+test('the surface is exactly six tools, and they are the tuple', () => {
+  /* FIX 4: `get_external_facts` is wired in, deliberately making this six —
+   * not a drift the count silently absorbed. Before the fix this asserted
+   * five and passed, which was itself the defect: rule 21's model-facing half
+   * governed a tool the surface never actually exposed. */
   reset();
   const specs = chatToolSpecs();
-  assert.equal(specs.length, 5, 'the v4.1 chat surface is deliberately five tools wide');
-  assert.equal(CHAT_TOOL_NAMES.length, 5);
+  assert.equal(specs.length, 6, 'the chat surface is deliberately six tools wide');
+  assert.equal(CHAT_TOOL_NAMES.length, 6);
   assert.deepEqual(
     specs.map((spec) => spec.name),
     [...CHAT_TOOL_NAMES],
@@ -642,10 +646,11 @@ test('the surface is exactly five tools, and they are the tuple', () => {
     'search_posts',
     'get_brand',
     'run_compliance',
+    'get_external_facts',
     'dispatch_feature',
   ]);
-  // No duplicate hiding a sixth behind a repeated name.
-  assert.equal(new Set(specs.map((spec) => spec.name)).size, 5);
+  // No duplicate hiding a seventh behind a repeated name.
+  assert.equal(new Set(specs.map((spec) => spec.name)).size, 6);
 });
 
 test('an unknown tool name resolves to nothing — including the inherited keys', async () => {

@@ -245,9 +245,12 @@ const BEARS_INK = /[\p{Lu}\p{Ll}\p{Lt}\p{Lo}\p{N}\p{P}\p{Sm}\p{Sc}]/gu;
 const DRAWS_NOTHING = /\p{Default_Ignorable_Code_Point}/u;
 
 /**
- * The separators that live INSIDE one figure: the grouping comma and the
- * decimal point, in both spellings, exactly the four characters claims-linter.ts
- * names as GROUP_SEPARATOR and DECIMAL_SEPARATOR.
+ * The separators that live INSIDE one figure.
+ *
+ * The first four are exactly what claims-linter.ts names GROUP_SEPARATOR and
+ * DECIMAL_SEPARATOR, re-spelled rather than imported because this module needs
+ * them only as an EXCLUSION, and that makes the drift direction safe: a list
+ * WIDER than the tokeniser's refuses more, never less.
  *
  * A CHARACTER A READER READS AS PART OF A NUMBER CANNOT BE WHAT ENDS ONE NUMBER
  * AND BEGINS THE NEXT. `{{personal}}٬{{academy}}` renders `508٬40`, which an
@@ -255,16 +258,74 @@ const DRAWS_NOTHING = /\p{Default_Ignorable_Code_Point}/u;
  * Both are the original attack assembled from two honest placeholders, and
  * neither character separates them.
  *
- * They are re-spelled rather than imported because this module needs them only
- * as an EXCLUSION, and that makes the drift direction safe: a list WIDER than
- * the tokeniser's refuses more, never less. U+060C ARABIC COMMA is deliberately
- * absent — it is a list mark and never groups digits, so «508، 40» reads as two
- * figures and is delivered.
+ * FIX 2 EXTENDS THIS PAST THE TOKENISER'S FOUR, because the same reading holds
+ * for three more spellings the tokeniser does not model as a group separator at
+ * all — so `quantities()` hands back TWO quantities either side of them, exactly
+ * as it does for an ungrammatical `٬` or `,` tail, and this is the rule that
+ * has to refuse the pair. This is a claim about what a READER reads, not about
+ * ink — U+0027, U+2019 and U+00B7 are all visible glyphs, and `separatesFigures`
+ * would otherwise call every one of them separation:
+ *
+ *   U+0027 APOSTROPHE           the Swiss digit-group mark: 1'234'567.
+ *   U+2019 RIGHT SINGLE QUOTE   the same mark's "smart quote" spelling, which is
+ *                               what a word processor or a chat client actually
+ *                               emits for a typed apostrophe.
+ *   U+00B7 MIDDLE DOT           the ISO 31-0 / older British group mark used in
+ *                               scientific and typeset figures: 1·234·567.
+ *
+ * `{{personal}}'{{academy}}` renders `508'40`, `{{personal}}’{{academy}}` renders
+ * `508’40`, `{{personal}}·{{academy}}` renders `508·40` — three more spellings of
+ * the same attack, closed the same way as the original two.
+ *
+ * U+060C ARABIC COMMA is deliberately absent — it is a list mark and never
+ * groups digits, so «508، 40» reads as two figures and is delivered. So is
+ * the plain single quote used as a QUOTATION mark rather than a digit group
+ * (there is no separate code point for that use — U+0027 does both jobs in
+ * plain ASCII text, and this rule accepts the cost of treating every instance
+ * as the narrower, safer reading: refusing an occasional honest quotation mark
+ * between two figures costs an operator a rewritten sentence, exactly the
+ * trade this file's header describes for the inverted gap rule above).
  */
-const FIGURE_INTERNAL = /[,٬.٫]/u;
+const FIGURE_INTERNAL = /[,٬.٫'’·]/u;
 
-/** Every character that ends a line. A line break is a separation a reader sees. */
+/**
+ * Every character the ORDINAL exception (`atLineStart`, below) treats as ending
+ * a line. Kept exactly as it was — this constant is NOT the fix for the
+ * contradiction that used to live in `separatesFigures()`; `atLineStart`'s own
+ * comment already audits it and explains why it is left alone. It answers one
+ * question only — "does the text one step back end at a line start" — which is
+ * unrelated to whether a gap between two figures visibly separates them.
+ */
 const LINE_BREAK = /[\n\r\u2028\u2029\u0085\u000B\u000C]/u;
+
+/**
+ * The one character that actually breaks a line under the chat surface's own
+ * CSS (`white-space: pre-wrap`, a plain text node — src/app/(app)/chat/page.tsx
+ * ~1608). `separatesFigures()` used to grant separation for the whole
+ * `LINE_BREAK` class above, which was two rules pretending to be one: the
+ * file's header says a control character "bears no ink, so it does not
+ * separate", and a code point that does not even break the line is a smaller
+ * claim to grant than that.
+ *
+ * MEASURED IN REAL CHROME, under that exact CSS, against the baseline
+ * "50840" = 40.44px (the width the two substituted values would render as if
+ * glued into one figure):
+ *
+ *   U+000C FORM FEED        40.44px  no line break  identical width to "50840"
+ *   U+000D CARRIAGE RETURN  40.44px  no line break  identical width to "50840"
+ *   U+2028 / U+2029         44.55px  no line break  same width as a SPACE
+ *   U+0085 / U+000B         50.13px  no line break
+ *   U+000A LINE FEED        24.27px  LINE BREAK     (the one that actually wraps)
+ *
+ * Every row except U+000A renders as if it had put no line break there at
+ * all — the width a reader sees is the width of an invisible or blank gap —
+ * so granting separation on their account was shipping a glued figure under
+ * cover of a rule that sounded like it was about something visible. Only
+ * U+000A breaks a line under `pre-wrap`; a CRLF pair breaks it too because it
+ * CONTAINS a U+000A, and a bare U+000D does not — which matching only U+000A
+ * gets right without a special case.
+ */
+const HARD_LINE_BREAK = /\n/u;
 
 /** One digit, 1 to 9, after normalisation. Never a two-digit head like `٨٨`. */
 const SINGLE_ORDINAL_DIGIT = /^[1-9]$/;
@@ -422,10 +483,17 @@ function overlapsSpan(spans: readonly Span[], start: number, end: number): boole
  * The predicate this replaced was `inlineGap()`, which asked whether the gap was
  * BLANK and answered the same question backwards. It is gone rather than
  * renamed: leaving it would leave the old question askable.
+ *
+ * EXPORTED so src/lib/agent/chat/run.ts can ask the SAME question about two
+ * TYPED quantities the way this file already asks it about two substituted
+ * ones. FIX 3's counterpart lives there rather than here because it is a
+ * decision about which typed violations the gate excuses, not about what
+ * separates two figures — that question has exactly one answer, and this is
+ * it.
  */
-function separatesFigures(text: string, from: number, to: number): boolean {
+export function separatesFigures(text: string, from: number, to: number): boolean {
   const gap = text.slice(from, to);
-  if (LINE_BREAK.test(gap)) return true;
+  if (HARD_LINE_BREAK.test(gap)) return true;
 
   BEARS_INK.lastIndex = 0;
   for (const found of gap.matchAll(BEARS_INK)) {

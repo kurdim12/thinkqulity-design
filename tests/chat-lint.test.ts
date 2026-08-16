@@ -11,7 +11,7 @@ import {
   strategistValues,
   type StrategistData,
 } from '../src/lib/agent/strategist/blocks.ts';
-import { claimsLinter } from '../src/lib/brain/law/claims-linter.ts';
+import { claimsLinter, quantities } from '../src/lib/brain/law/claims-linter.ts';
 import { CLOSE, isSourceKey, OPEN, REDACTED } from '../src/lib/brain/substitute.ts';
 import { CHAT_SYSTEM } from '../src/lib/agent/chat/system.ts';
 import type {
@@ -1316,12 +1316,20 @@ test('two sources that disagree about one key resolve to NEITHER value', async (
 
 /* ------------------------------------------- the exploits, at the new step -- */
 
-test('THE ROUND-3 COUNTER-EXAMPLE — the sub-100 head the linter cannot see is cut', async () => {
+test('THE ROUND-3 COUNTER-EXAMPLE — FIX 3: both typed halves are cut, not just the sub-100 head', async () => {
   /* «٨٨<U+034F>٥٠٨» renders to the operator as ٨٨٥٠٨. U+034F is \p{Mn}: not a
    * joiner and not blank, so the claims-linter reads TWO quantities, drops ٨٨
    * under its 100 floor in silence, finds ٥٠٨ sourced, and passes. This is the
    * counter-example v5 exists for, and the first assertion is that the lint step
-   * really does still let it through — otherwise the rest proves nothing. */
+   * really does still let it through — otherwise the rest proves nothing.
+   *
+   * BEFORE FIX 3, `substitute()` reported ٨٨ and ٥٠٨ as two SEPARATE
+   * bare-quantity violations, and `accountedFor()` excused ٥٠٨ on its own —
+   * it really is a quantity the linter could source — so only ٨٨ was ever cut
+   * and the fabricated 88508 reached the reply with only its head amputated.
+   * FIX 3 asks the same question `separatesFigures()` already asks about a
+   * SUBSTITUTED pair, about this TYPED pair: nothing visible sits between ٨٨
+   * and ٥٠٨, so neither is excused and both are cut. */
   const attack = `المتوسط ٨٨${CGJ}٥٠٨ متابع.`;
 
   assert.equal(
@@ -1339,16 +1347,70 @@ test('THE ROUND-3 COUNTER-EXAMPLE — the sub-100 head the linter cannot see is 
     transport: model.transport,
   });
 
-  // There is no floor here, so the head is exactly as loud as the tail.
-  assert.deepEqual(outcome.law_report.stripped, ['٨٨']);
-  assert.equal(outcome.reply, `المتوسط ${UNSOURCED_CHIP}${CGJ}٥٠٨ متابع.`);
-  assert.equal(outcome.reply.includes('٨٨'), false, 'the head is gone, so the figure is destroyed');
+  // Both halves are gone: the glued pair is refused whole, not one digit run
+  // at a time.
+  assert.deepEqual(outcome.law_report.stripped, ['٨٨', '٥٠٨']);
+  assert.equal(outcome.reply, `المتوسط ${UNSOURCED_CHIP}${CGJ}${UNSOURCED_CHIP} متابع.`);
+  assert.equal(outcome.reply.includes('٨٨'), false, 'the head is gone');
+  assert.equal(outcome.reply.includes('٥٠٨'), false, 'the tail is gone too — it was never delivered');
   assert.equal(outcome.law_report.repaired, true);
 
-  // And the tail — a figure the model TYPED — is reported as resting on the old
-  // guarantee, not the new one.
-  assert.deepEqual(outcome.substitution.typed, ['٥٠٨']);
-  assert.equal(outcome.substitution.hard_guarantee, false);
+  // Nothing typed survives into the delivered reply, so nothing here rests on
+  // the old guarantee any more — both halves were refused and cut, not
+  // tolerated.
+  assert.deepEqual(outcome.substitution.typed, []);
+  assert.equal(outcome.substitution.hard_guarantee, true);
+});
+
+/* ------------------------------------------- FIX 3, the executed shapes ---- */
+
+/**
+ * The four shapes FIX 3 closes, western digits this time and typed with the
+ * blocks' own numbers so `508` and `40` are individually sourceable — which is
+ * exactly what let `accountedFor()` excuse each half before the fix. Every row
+ * used to ship `hard_guarantee: false` (honest) with the fabricated `50840`
+ * delivered anyway; after the fix each is refused and cut, whole.
+ */
+const TYPED_GLUE: readonly (readonly [string, string])[] = [
+  ['U+034F COMBINING GRAPHEME JOINER', CGJ],
+  ['U+000D CARRIAGE RETURN (does not break a line under pre-wrap)', '\r'],
+  ['U+0027 APOSTROPHE (a Swiss digit-group mark)', "'"],
+  ['U+066C ARABIC THOUSANDS SEPARATOR', "٬"],
+];
+
+for (const [name, glue] of TYPED_GLUE) {
+  test(`FIX 3 EXECUTED: typed 508+40 glued by ${name} is refused whole`, async () => {
+    const attack = `الفارق 508${glue}40 نقطة.`;
+    const model = fakeModel([{ text: attack }, { text: attack }]);
+
+    const outcome = await runAgentChat({
+      data: chatData(),
+      history: [],
+      message: 'قديّش الفارق؟',
+      quality: 'standard',
+      transport: model.transport,
+    });
+
+    // BEFORE FIX 3 this delivered `50840` unstripped, with `typed: ['508','40']`
+    // and `hard_guarantee: false` — honest about the mechanism, wrong about
+    // the screen. AFTER: both halves are cut and nothing typed survives.
+    assert.deepEqual(outcome.law_report.stripped.slice().sort(), ['40', '508']);
+    assert.equal(outcome.reply.includes('50840'), false);
+    assert.equal(outcome.reply.includes('508'), false);
+    assert.equal(outcome.reply.includes('40'), false);
+    assert.deepEqual(outcome.substitution.typed, []);
+    assert.equal(outcome.substitution.hard_guarantee, true);
+  });
+}
+
+test('FIX 3 CONTROL — U+200B ZERO WIDTH SPACE was already refused, by the linter joining across it', () => {
+  /* The task's own control: this one never needed FIX 3. `quantities()` joins
+   * digits across \p{Cf}, so `508<ZWSP>40` is ONE quantity that substitute.ts
+   * refuses as `bare-quantity` on its own — never two violations for FIX 3's
+   * pairing rule to even see. Asserted directly against the linter's own
+   * tokeniser, which is the one FIX 3 must not duplicate. */
+  const zwsp = "​";
+  assert.deepEqual(quantities(`508${zwsp}40`).map((q) => q.raw), [`508${zwsp}40`]);
 });
 
 test('THE SAME ATTACK THROUGH THE NEW DOOR — a head typed against a SUBSTITUTED value', async () => {

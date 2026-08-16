@@ -12,6 +12,7 @@ import {
   wholeQuantity,
 } from '@/lib/brain/law/claims-linter';
 import {
+  separatesFigures,
   substitute,
   type SubstitutionViolation,
   type ViolationKind,
@@ -625,6 +626,69 @@ function accountedFor(
   return key !== null && sourced.has(key);
 }
 
+/**
+ * FIX 3 — THE TYPED COUNTERPART OF SUBSTITUTE.TS'S SIDE-BY-SIDE RULE.
+ *
+ * `substitute()` already refuses two SUBSTITUTED values standing side by side
+ * with nothing visible between them, as `glued-value`. It has no rule at all
+ * for two TYPED quantities doing the same thing, because from inside
+ * `substitute()` a typed digit run is just a `bare-quantity` — one violation,
+ * reported alone. `508<U+034F>40` typed directly (no placeholder either side)
+ * comes back as TWO bare-quantity violations, `508` and `40`, and if both
+ * happen to be quantities the linter could source — which is exactly the shape
+ * `accountedFor()` exists to tolerate — `accountedFor()` excuses each one on
+ * its own and neither ever reaches `refused`. The operator reads `50840`,
+ * `hard_guarantee` is honestly `false` because a typed figure was involved, but
+ * the fabricated glued number is on the screen regardless.
+ *
+ * THE SAME PREDICATE AS FIX 1, NOT A SECOND ONE. `separatesFigures()` already
+ * answers "does anything visible sit between these two figures" for a
+ * substituted pair; this asks the identical question about a typed pair, over
+ * the identical text — `delivered`, the string the operator actually reads —
+ * so a character invented after this file was written is refused here for the
+ * same reason it is refused there, with nothing to keep in step by hand.
+ *
+ * Only ADJACENT `bare-quantity` violations are inspected — `glued-value` is
+ * already how `substitute()` reports a typed figure welded onto a SUBSTITUTED
+ * one, and reusing this rule for that case would be a second, competing
+ * decision about the same text. A pair found glued here is added to the
+ * refused set WHOLE: excusing only one half of `508<U+034F>40` would still
+ * deliver the other half sitting right where the fabrication was.
+ */
+function typedQuantitiesGlued(
+  text: string,
+  violations: readonly SubstitutionViolation[],
+): ReadonlySet<SubstitutionViolation> {
+  const glued = new Set<SubstitutionViolation>();
+  const bare = violations.filter(
+    (violation) => violation.kind === 'bare-quantity' && violation.frame === 'final',
+  );
+  for (let index = 0; index + 1 < bare.length; index += 1) {
+    const left = bare[index];
+    const right = bare[index + 1];
+    if (separatesFigures(text, left.end, right.start)) continue;
+    glued.add(left);
+    glued.add(right);
+  }
+  return glued;
+}
+
+/**
+ * The two rules composed: a violation is left in `refused` when it is either
+ * NOT excused on its own, or excused on its own but half of a typed pair
+ * carrying no visible separation between them.
+ */
+function refuseViolations(
+  final: string,
+  violations: readonly SubstitutionViolation[],
+  sourced: ReadonlySet<string>,
+): SubstitutionViolation[] {
+  const glued = typedQuantitiesGlued(final, violations);
+  return violations.filter(
+    (violation) => glued.has(violation) || !accountedFor(violation, sourced),
+  );
+}
+
 /** A violation as the run result keeps it. Never deliverable text. */
 function toFault(violation: SubstitutionViolation): ChatSubstitutionFault {
   return {
@@ -1231,9 +1295,7 @@ export async function runAgentChat(args: RunChatArgs): Promise<ChatRunResult> {
    * to a caption full of digits is linted as that caption, not as `{{key}}`. */
   let substituted = substitute(draft, values);
   let delivered = substituted.final;
-  let refused = substituted.violations.filter(
-    (violation) => !accountedFor(violation, sourcedValues),
-  );
+  let refused = refuseViolations(delivered, substituted.violations, sourcedValues);
 
   let lint = claimsLinter(delivered, context);
   results.push(lint);
@@ -1262,9 +1324,7 @@ export async function runAgentChat(args: RunChatArgs): Promise<ChatRunResult> {
     draft = retry.text;
     substituted = substitute(draft, values);
     delivered = substituted.final;
-    refused = substituted.violations.filter(
-      (violation) => !accountedFor(violation, sourcedValues),
-    );
+    refused = refuseViolations(delivered, substituted.violations, sourcedValues);
     lint = claimsLinter(delivered, context);
     results.push(lint);
   }
@@ -1322,9 +1382,15 @@ export async function runAgentChat(args: RunChatArgs): Promise<ChatRunResult> {
 
   /* The tolerated class, named. Every quantity here is one the MODEL typed and
    * the linter could source — delivered, and resting on the old guarantee. An
-   * empty list is the whole of what `hard_guarantee` claims. */
+   * empty list is the whole of what `hard_guarantee` claims.
+   *
+   * FIX 3: a typed pair the gap rule found glued is excluded here too, even
+   * though `accountedFor()` would tolerate each half on its own — it is not
+   * "delivered on the old guarantee", it is refused and cut, and `typed` must
+   * not claim tolerance for a figure that never reached the reader. */
+  const typedGlued = typedQuantitiesGlued(substituted.final, substituted.violations);
   const typed = substituted.violations
-    .filter((violation) => accountedFor(violation, sourcedValues))
+    .filter((violation) => accountedFor(violation, sourcedValues) && !typedGlued.has(violation))
     .map((violation) => violation.raw ?? '');
 
   const substitution: ChatSubstitutionReport = {
