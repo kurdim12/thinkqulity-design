@@ -13,7 +13,9 @@ import {
   GroundingTag,
   WarningList,
 } from '@/components/ui';
+import { AskAbout } from '@/components/AskAbout';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/date';
+import type { AskScope } from '@/lib/chat/scope';
 import { GOLD } from '@/lib/theme';
 import type {
   Account,
@@ -593,12 +595,19 @@ function Statement({
   grounding,
   accent,
   lead,
+  scope,
 }: {
   text: string;
   basis: BasisRef[];
   grounding?: 'data' | 'hypothesis';
   accent?: string;
   lead?: React.ReactNode;
+  /**
+   * The typed reference to THIS entry, when there is one. Given, the statement
+   * ends with an Ask that opens the chat pointed at the entry by (digest,
+   * section, position) — never by the sentence above, which the model wrote.
+   */
+  scope?: AskScope;
 }) {
   return (
     <div
@@ -616,11 +625,16 @@ function Statement({
         </div>
       ) : null}
       <BasisList basis={basis} />
+      {scope === undefined ? null : (
+        <div style={{ marginBlockStart: 8 }}>
+          <AskAbout scope={scope} label={text} />
+        </div>
+      )}
     </div>
   );
 }
 
-function DeltaRow({ delta }: { delta: StrategistDelta }) {
+function DeltaRow({ delta, scope }: { delta: StrategistDelta; scope: AskScope }) {
   const { tt } = useLocale();
   // Neutral by design: "up" is not automatically good — followers up and unfollows
   // up are the same arrow. The direction is stated; the judgement is not.
@@ -637,6 +651,7 @@ function DeltaRow({ delta }: { delta: StrategistDelta }) {
       text={delta.label_ar}
       basis={delta.basis}
       grounding={delta.grounding}
+      scope={scope}
       lead={
         <Tag style={{ marginInlineEnd: 0 }}>
           <span aria-hidden="true">{arrow}</span> {word}
@@ -715,7 +730,15 @@ function LedgerDecisionRow({ decision }: { decision: LedgerDecision }) {
 }
 
 /** A decision as this digest proposed it, before the ledger gave it an id. */
-function ProposedDecisionRow({ decision, index }: { decision: StoredDecision; index: number }) {
+function ProposedDecisionRow({
+  decision,
+  index,
+  scope,
+}: {
+  decision: StoredDecision;
+  index: number;
+  scope: AskScope;
+}) {
   const { tt, locale } = useLocale();
   const kindLabel = useKindLabel();
 
@@ -754,6 +777,10 @@ function ProposedDecisionRow({ decision, index }: { decision: StoredDecision; in
       </Descriptions>
 
       <BasisList basis={decision.basis} />
+
+      <div style={{ marginBlockStart: 8 }}>
+        <AskAbout scope={scope} label={decision.statement_ar} />
+      </div>
     </div>
   );
 }
@@ -1239,6 +1266,18 @@ export default function DigestPage() {
                         )}
 
                         <BasisList basis={correction.basis} />
+
+                        <div style={{ marginBlockStart: 8 }}>
+                          <AskAbout
+                            scope={{
+                              kind: 'digest_entry',
+                              digest_id: digest.id,
+                              section: 'corrections',
+                              index,
+                            }}
+                            label={correction.what_is_true_ar}
+                          />
+                        </div>
                       </div>
                     ))}
                   </Space>
@@ -1252,7 +1291,16 @@ export default function DigestPage() {
                 ) : (
                   <Space direction="vertical" size={16} style={{ width: '100%' }}>
                     {payload.deltas.map((delta: StrategistDelta, index: number) => (
-                      <DeltaRow key={`delta-${index}`} delta={delta} />
+                      <DeltaRow
+                        key={`delta-${index}`}
+                        delta={delta}
+                        scope={{
+                          kind: 'digest_entry',
+                          digest_id: digest.id,
+                          section: 'deltas',
+                          index,
+                        }}
+                      />
                     ))}
                   </Space>
                 )}
@@ -1271,6 +1319,12 @@ export default function DigestPage() {
                         basis={win.basis}
                         grounding={win.grounding}
                         accent="#389e0d"
+                        scope={{
+                          kind: 'digest_entry',
+                          digest_id: digest.id,
+                          section: 'wins',
+                          index,
+                        }}
                       />
                     ))}
                   </Space>
@@ -1289,6 +1343,12 @@ export default function DigestPage() {
                         basis={concern.basis}
                         grounding={concern.grounding}
                         accent="#d4380d"
+                        scope={{
+                          kind: 'digest_entry',
+                          digest_id: digest.id,
+                          section: 'concerns',
+                          index,
+                        }}
                       />
                     ))}
                   </Space>
@@ -1317,6 +1377,12 @@ export default function DigestPage() {
                         key={`proposed-${index}`}
                         decision={decision}
                         index={index}
+                        scope={{
+                          kind: 'digest_entry',
+                          digest_id: digest.id,
+                          section: 'decisions',
+                          index,
+                        }}
                       />
                     ))}
                   </Space>

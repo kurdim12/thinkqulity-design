@@ -133,11 +133,13 @@ export default function ConceptsPage() {
       });
       setWarnings(res.result.warnings);
       setConcepts((prev) => [...res.persisted.inserted, ...prev]);
+      // The count is the response's own array length; the model id it used to
+      // carry belonged in the operator room, not in a toast on this screen.
       notification.success({
-        message: tt('تم التوليد', 'Generated'),
+        message: tt('وصلت الأفكار', 'The concepts landed'),
         description: tt(
-          `تم حفظ ${res.persisted.inserted.length} فكرة كمسودة بواسطة ${res.model}.`,
-          `Saved ${res.persisted.inserted.length} concept(s) as drafts using ${res.model}.`,
+          `${res.persisted.inserted.length} مسودّة — اعتمد ما يعجبك.`,
+          `${res.persisted.inserted.length} draft(s). Approve the ones that earn it.`,
         ),
       });
     } catch (err) {
@@ -273,8 +275,8 @@ export default function ConceptsPage() {
       <PageHeader
         title={t.nav.concepts}
         subtitle={tt(
-          'يفكّر الوكيل ويقترح؛ النشر يبقى بيدك.',
-          'The agent thinks and proposes; posting stays in your hands.',
+          'أفكار منشورات بخطّاف ونصّ عربي واتجاه بصري — تعتمد ما يعجبك وتترك الباقي.',
+          'Post ideas with a hook, Arabic copy and a visual direction. Approve what earns it, drop the rest.',
         )}
       />
 
@@ -321,7 +323,15 @@ export default function ConceptsPage() {
         <ErrorState error={error.message} hint={error.hint} onRetry={() => void load()} />
       ) : concepts.length === 0 ? (
         <EmptyState
-          description={tt('لا توجد أفكار بعد.', 'No concepts yet.')}
+          title={tt('لا أفكار بعد', 'No concepts yet')}
+          description={tt(
+            'كل فكرة هنا تحمل خطّافاً ونصّاً عربياً واتجاهاً بصرياً وسبباً يشرح لماذا هي الآن — ووسماً يقول أمبنيّة على قياس أم على فرضية.',
+            'Each one arrives with a hook, Arabic copy, a visual direction, and a reason it is worth posting now — tagged measured or hypothesis so you can tell which is which.',
+          )}
+          hint={tt(
+            'العدد والحساب والموضوع في الشريط أعلاه. تُحفَظ مسودّات.',
+            'Count, account and theme are in the bar above. They save as drafts.',
+          )}
           actionLabel={tt('ولّد أول دفعة', 'Generate the first batch')}
           onAction={() => void handleGenerate()}
         />

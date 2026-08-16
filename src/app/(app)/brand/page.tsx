@@ -16,9 +16,7 @@ import {
   Tabs,
   Tag,
   Typography,
-  Upload,
 } from 'antd';
-import type { UploadFile } from 'antd/es/upload/interface';
 import { useLocale } from '@/lib/i18n/LocaleContext';
 import { apiGet, apiSend, describeError } from '@/lib/client/api';
 import { PageHeader, SeedAlert, EmptyState, ErrorState, LoadingBlock, ArabicText } from '@/components/ui';
@@ -155,8 +153,6 @@ export default function BrandPage() {
   const [voiceModalOpen, setVoiceModalOpen] = useState(false);
   const [voiceForm] = Form.useForm<VoiceFormValues>();
   const [savingVoice, setSavingVoice] = useState(false);
-
-  const [fileList, setFileList] = useState<UploadFile[]>([]);
 
   const [swatchRows, setSwatchRows] = useState<SwatchRow[]>([]);
   const [paletteNote, setPaletteNote] = useState('');
@@ -422,10 +418,10 @@ export default function BrandPage() {
         message.success(
           res.escalated
             ? tt(
-                'حُفظ الادعاء — ورُفع تلقائيًا كادعاء عن أحد حسابات العميل.',
-                'Claim filed — and escalated automatically: it names one of the client accounts.',
+                'حُفظ المرجع — ووُسِم تلقائيًا لأنه يتحدث عن أحد حسابات العميل. أرقامنا نقيسها نحن.',
+                'Reference saved — and flagged automatically: it speaks about one of the client accounts. Those figures are ours to measure.',
               )
-            : tt('حُفظ الادعاء.', 'Claim filed.'),
+            : tt('حُفظ المرجع.', 'Reference saved.'),
         );
         setClaimText('');
         loadWeb();
@@ -446,7 +442,12 @@ export default function BrandPage() {
     <div>
       {brand.facts.length === 0 ? (
         <EmptyState
-          description={tt('لم تُزرع أي حقائق بعد.', 'No facts have been seeded yet.')}
+          title={tt('لا حقائق بعد', 'No facts yet')}
+          description={tt(
+            'الحقائق هي الأرضية التي يقف عليها كل ما يكتبه الوكيل: من هو العميل، وماذا يبيع، ولمن — وكل حقيقة تحمل مصدرها.',
+            'The facts are the floor everything the agent writes stands on: who the client is, what he sells, and to whom — each one carrying its source.',
+          )}
+          hint={tt('تُكتب في ملف البذور ثم تُقرأ هنا.', 'They are written in the seed file and read here.')}
         />
       ) : (
         <>
@@ -463,7 +464,7 @@ export default function BrandPage() {
             })}
           </Descriptions>
           <Typography.Text type="secondary" style={{ display: 'block', marginBlockStart: 8, fontSize: 12 }}>
-            {tt('الحقائق للقراءة فقط — أضِف أو عدِّل عبر supabase/seed.sql.', 'Facts are read-only — add or edit them via supabase/seed.sql.')}
+            {tt('تُحرَّر هذه الحقائق في ملف البذور، لا من هذه الشاشة.', 'These are edited in the seed file, not on this screen.')}
           </Typography.Text>
         </>
       )}
@@ -474,11 +475,16 @@ export default function BrandPage() {
     <div>
       {brand.voice_examples.length === 0 ? (
         <EmptyState
+          title={tt('لا أمثلة صوت بعد', 'No voice examples yet')}
           description={tt(
-            'لا توجد أمثلة صوت. بدونها ينتج الوكيل نسختين من النبرة ويضع علامة "يحتاج معايرة".',
-            'No voice examples yet. Without them the agent produces two register variants and flags "needs calibration".',
+            'الصق منشوراً كتبه أحمد بنفسه وأعجبك. هذه الأمثلة هي ما يتعلّم منه الوكيل نبرته — كيف يفتح، ومتى يقصر، وأين يمزح.',
+            'Paste a post Ahmad wrote himself and you liked. These are what the agent learns his register from — how he opens, when he keeps it short, where he jokes.',
           )}
-          actionLabel={tt('إضافة مثال', 'Add an example')}
+          hint={tt(
+            'حتى يصل أوّلها، يكتب الوكيل نسختين من كل نبرة ويضع عليها «يحتاج معايرة».',
+            'Until the first one lands, the agent writes two register variants and marks them "needs calibration".',
+          )}
+          actionLabel={tt('أضف مثالاً', 'Add an example')}
           onAction={() => setVoiceModalOpen(true)}
         />
       ) : (
@@ -591,28 +597,23 @@ export default function BrandPage() {
               </a>
             ))}
           </div>
+          {/* The old caption called these "published pieces" and said the
+              palette below was sampled from them. Neither is knowable here: an
+              asset row says a file was uploaded, not that it ran, and the
+              swatches under it are typed in by hand. The count is the array's
+              own length, and that is all this line now claims. */}
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            {tt(
-              `${creatives.length} منشورًا منشورًا. الألوان أدناه مأخوذة من هذه الملفات نفسها.`,
-              `${creatives.length} published pieces. The palette below was sampled from these files.`,
-            )}
+            <span className="tq-num">{creatives.length}</span>{' '}
+            {tt('ملفًا من أعمال العلامة.', 'brand files.')}
           </Typography.Text>
         </>
       ) : (
         <EmptyState
+          title={tt('لا أعمال بعد', 'No brand work yet')}
           description={tt(
-            'لم تُرفع أي أعمال بعد.',
-            'No brand work uploaded yet.',
+            'أعمال العلامة هي ما يرى الوكيل العلامة من خلاله: التصاميم المنشورة، وملفات الهوية. ضعها بجانب مجلد التطبيق ونفّذ npm run assets.',
+            'The brand work is how the agent sees the brand at all — the finished pieces and the identity files. Put them beside the app folder and run npm run assets.',
           )}
-          actionLabel={tt('كيف أرفعها', 'How to upload')}
-          onAction={() =>
-            message.info(
-              tt(
-                'ضع الملفات بجانب مجلد التطبيق ونفّذ: npm run assets',
-                'Put the files beside the app folder and run: npm run assets',
-              ),
-            )
-          }
         />
       )}
 
@@ -635,27 +636,15 @@ export default function BrandPage() {
         </div>
       ) : null}
 
-      <Upload.Dragger
-        multiple
-        accept="image/*,.pdf"
-        fileList={fileList}
-        beforeUpload={() => false}
-        onChange={(info) => setFileList(info.fileList)}
-        style={{ marginBlockStart: 16 }}
-      >
-        <p className="ant-upload-text">{tt('اسحب الملفات هنا أو انقر للاختيار', 'Drag files here or click to select')}</p>
-      </Upload.Dragger>
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBlockStart: 12, marginBlockEnd: 24 }}
-        message={tt(
-          'هذا المربع للمعاينة فقط — للرفع الدائم استخدم: npm run assets',
-          'This drop zone is preview-only — to store assets permanently run: npm run assets',
-        )}
-      />
+      {/* A drop zone that stored nothing, under a banner apologising for it.
+          Deleted rather than reworded: the empty state above names the one
+          command that actually files an asset, and a control that cannot do
+          what it looks like it does is the dead button v6 is here to stop
+          shipping. */}
 
-      <Typography.Title level={5}>{tt('اللوحة', 'Palette')}</Typography.Title>
+      <Typography.Title level={5} style={{ marginBlockStart: 24 }}>
+        {tt('اللوحة', 'Palette')}
+      </Typography.Title>
       {swatchRows.map((row, index) => (
         <div key={index} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBlockEnd: 8 }}>
           <Input
@@ -750,10 +739,17 @@ export default function BrandPage() {
         rows={10}
         value={audienceNotes}
         onChange={(e) => setAudienceNotes(e.target.value)}
+        placeholder={tt(
+          'من يتابع أحمد، ولماذا؟ ما الذي يسألونه كثيراً، وما الذي يوقفهم عن الشراء؟',
+          'Who follows Ahmad, and why? What do they keep asking, and what stops them buying?',
+        )}
         style={{ marginBlockEnd: 8 }}
       />
       <Typography.Text type="secondary" style={{ display: 'block', marginBlockEnd: 12, fontSize: 12 }}>
-        {tt('يُمرَّر هذا النص إلى الوكيل كما هو. اكتب ما تعرفه فقط.', 'This text is passed to the agent verbatim. Write only what you actually know.')}
+        {tt(
+          'يصل هذا النص إلى الوكيل حرفياً — فاكتب ما تعرفه، لا ما تتمنّاه.',
+          'This reaches the agent word for word, so write what you know rather than what you hope.',
+        )}
       </Typography.Text>
       <Button type="primary" loading={savingAudience} onClick={saveAudienceNotes}>
         {t.common.save}
@@ -763,28 +759,30 @@ export default function BrandPage() {
 
   const webTab = (
     <div>
-      <Alert
-        type="warning"
-        showIcon
-        style={{ marginBlockEnd: 16 }}
-        message={tt('ما يُقرأ من الويب ليس قياسًا', 'What the web says is not a measurement')}
-        description={tt(
-          'كل ما يُحفَظ هنا هو جملة نشرها شخص آخر، تُخزَّن حرفيًا مع عنوانها ولحظة قراءتها. لا تحمل مفتاح مصدر، ولا يمكن لأي رقم فيها أن يصل إلى مُخرَج للعميل. الجلب يحدث عند الضغط على الزر فقط، ويُسجَّل قبل أن يخرج الطلب.',
-          'Everything filed here is a sentence somebody else published, stored word for word with the address it was published at and the moment it was read. It carries no source key, so no figure in it can reach a client-facing deliverable. A fetch happens when you press the button, and it is ledgered before the request leaves.',
+      {/* «ما يقوله الويب» — «What the web says» — was the old framing, and it
+          set the reader up to read a stranger's sentence as a reading. These
+          are references: published material, kept for ideas and context and
+          attributed wherever it is used. One line, stated once. */}
+      <Typography.Paragraph type="secondary" style={{ fontSize: 13, marginBlockEnd: 16 }}>
+        {tt(
+          'مادة منشورة، تُحفَظ حرفيًا مع عنوانها — وقود للأفكار والسياق، تُنسَب لمصدرها أينما استُخدمت، ولا تصير رقمًا يُعرَض على العميل.',
+          'Published material, stored verbatim with its address — fuel for ideas and context, attributed wherever used, never a client-facing figure.',
         )}
-      />
+      </Typography.Paragraph>
 
       {webError ? (
         <ErrorState error={webError.message} hint={webError.hint} onRetry={loadWeb} />
       ) : null}
 
+      {/* The day's remaining fetches, beside the button that spends them —
+          the one place in this product where a budget belongs on a screen
+          other than Data, because pressing Retrieve is what draws on it. */}
       {webState ? (
         <Typography.Text type="secondary" style={{ display: 'block', marginBlockEnd: 12, fontSize: 12 }}>
           {tt('عمليات الجلب اليوم: ', 'Fetches today: ')}
           <span className="tq-num">
             {formatNumber(webState.cap.reserved_fetches)} / {formatNumber(webState.cap.daily_cap)}
           </span>
-          {tt(' — يُحتسب كل محاولة، بما فيها المرفوضة.', ' — every attempt counts, refusals included.')}
         </Typography.Text>
       ) : null}
 
@@ -807,14 +805,14 @@ export default function BrandPage() {
           type="error"
           showIcon
           style={{ marginBlockEnd: 16 }}
-          message={`${tt('رُفض: ', 'Refused: ')}${retrieval.reason}`}
+          message={`${tt('لم تُجلب: ', 'Not retrieved: ')}${retrieval.reason}`}
           description={
             <span dir="auto">
               {retrieval.detail}
               {retrieval.retrieval_id ? (
                 <>
                   <br />
-                  {tt('سُجِّلت المحاولة برقم ', 'Recorded in the ledger as ')}
+                  {tt('سُجِّلت المحاولة في السجل برقم ', 'The attempt is in the ledger as ')}
                   <code>{retrieval.retrieval_id}</code>
                 </>
               ) : null}
@@ -857,7 +855,7 @@ export default function BrandPage() {
             </Descriptions.Item>
           </Descriptions>
 
-          <Typography.Title level={5}>{tt('نص الصفحة', 'What the page says')}</Typography.Title>
+          <Typography.Title level={5}>{tt('نص الصفحة', 'The page text')}</Typography.Title>
           <div
             dir="auto"
             style={{
@@ -875,7 +873,7 @@ export default function BrandPage() {
           </div>
 
           {/* ---------------------------------------------------- file it -- */}
-          <Typography.Title level={5}>{tt('سجِّل ادعاءً', 'File a claim')}</Typography.Title>
+          <Typography.Title level={5}>{tt('احفظ مرجعًا', 'Save a reference')}</Typography.Title>
           <Typography.Text type="secondary" style={{ display: 'block', marginBlockEnd: 8, fontSize: 12 }}>
             {tt(
               'انسخ الجملة كما نُشرت حرفيًا. لا تلخّص ولا تترجم ولا تقرّب رقمًا.',
@@ -956,13 +954,13 @@ export default function BrandPage() {
             disabled={!claimText.trim() || !claimTopic.trim()}
             style={{ marginBlockEnd: 24 }}
           >
-            {tt('سجِّل', 'File it')}
+            {tt('احفظه', 'Save it')}
           </Button>
         </>
       ) : null}
 
-      {/* ---------------------------------------------------- filed claims -- */}
-      <Typography.Title level={5}>{tt('الادعاءات المحفوظة', 'Filed claims')}</Typography.Title>
+      {/* ------------------------------------------------------ references -- */}
+      <Typography.Title level={5}>{tt('المراجع المحفوظة', 'Saved references')}</Typography.Title>
       {webLoading && webState === null ? (
         <LoadingBlock />
       ) : webState && webState.facts.length > 0 ? (
@@ -997,9 +995,14 @@ export default function BrandPage() {
         />
       ) : (
         <EmptyState
+          title={tt('لا مراجع بعد', 'No references yet')}
           description={tt(
-            'لم يُسجَّل أي ادعاء بعد. هذا يعني «لم ننظر»، وهو غير «الويب لا يقول شيئًا».',
-            'Nothing filed yet. That means "we have not looked", which is not the same as "the web says nothing".',
+            'الصق عنوان صفحة نشرها غيرنا — تقرير سوق، مقالة، إعلان منافس — واحفظ منها الجملة التي تهمّك كما هي. يقرأ الوكيل المحفوظ هنا حين يبحث عن سياق أو فكرة.',
+            'Paste the address of a page somebody else published — a market report, an article, a competitor announcement — and keep the sentence that matters, as it was written. The agent reads what is here when it needs context or an angle.',
+          )}
+          hint={tt(
+            'هذا يعني «لم ننظر بعد»، لا «لا يوجد ما يُقال».',
+            'Empty means "we have not looked yet", not "there is nothing out there".',
           )}
         />
       )}
@@ -1043,7 +1046,10 @@ export default function BrandPage() {
         />
       ) : (
         <EmptyState
-          description={tt('لم تُسجَّل أي محاولة جلب.', 'No fetch has ever been attempted.')}
+          description={tt(
+            'كل محاولة جلب ستظهر هنا بحالتها وعنوانها ووقتها — حتى المرفوضة.',
+            'Every attempt will appear here with its status, its address and its time — refusals included.',
+          )}
         />
       )}
     </div>
@@ -1054,8 +1060,8 @@ export default function BrandPage() {
       <PageHeader
         title={t.nav.brand}
         subtitle={tt(
-          'كل ما يعرفه الوكيل عن العميل — ولا شيء غير ذلك.',
-          'Everything the agent knows about the client — and nothing else.',
+          'كل ما يعرفه الوكيل عن العميل: الحقائق، والصوت، والهوية، والجمهور، والمراجع.',
+          'Everything the agent knows about the client — the facts, the voice, the identity, the audience, the references.',
         )}
         extra={
           brand.status === 'live' ? (
@@ -1075,7 +1081,7 @@ export default function BrandPage() {
           { key: 'voice', label: tt('الصوت', 'Voice'), children: voiceTab },
           { key: 'identity', label: tt('الهوية', 'Identity'), children: identityTab },
           { key: 'audience', label: tt('الجمهور', 'Audience'), children: audienceTab },
-          { key: 'web', label: tt('الويب', 'Web'), children: webTab },
+          { key: 'web', label: tt('مراجع خارجية', 'References'), children: webTab },
         ]}
       />
 

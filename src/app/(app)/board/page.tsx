@@ -27,6 +27,7 @@ import {
   ArabicText,
   GroundingTag,
 } from '@/components/ui';
+import { AskAbout } from '@/components/AskAbout';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/date';
 import type { Grounding } from '@/lib/types/db';
 
@@ -191,6 +192,17 @@ interface AnalyzeRunResponse {
 type AccountFilter = 'all' | BoardAccount;
 type BandFilter = 'all' | PercentileBand;
 
+/**
+ * What names this post to a reader — used ONLY in the Ask affordance's
+ * accessible name, never encoded and never sent (see src/lib/chat/scope.ts).
+ * The post's own words when it has any; otherwise the id Instagram gave it,
+ * which is a real identifier rather than a description nobody wrote.
+ */
+function postName(post: BoardPost): string {
+  const caption = post.caption === null ? '' : post.caption.trim();
+  return caption.length > 0 ? caption : post.ig_id;
+}
+
 function vsAccountColor(value: number): string {
   if (value > 1.5) return 'green';
   if (value < 0.75) return 'red';
@@ -341,7 +353,7 @@ function PostMediaSlot({ post, enabled }: { post: BoardPost; enabled: boolean | 
 
   const reason = failed
     ? tt(
-        'الكائن موجود في التخزين، لكن المتصفح لم يستطع قراءته. القراءة تمرّ عبر ‎/api/assets وتتطلّب جلسة مشغِّل، والرابط الموقَّع ينتهي خلال خمس دقائق — أعد تحميل الصفحة.',
+        'الكائن موجود في التخزين، لكن المتصفح لم يستطع قراءته. القراءة تمرّ عبر \u200E/api/assets وتتطلّب جلسة مشغِّل، والرابط الموقَّع ينتهي خلال خمس دقائق — أعد تحميل الصفحة.',
         'The object is in storage, but this browser could not read it. The read goes through /api/assets, needs an operator session, and the signed URL it redirects to expires in five minutes — reload the page.',
       )
     : post.media.mirrored === null
@@ -1015,11 +1027,24 @@ export default function BoardPage() {
                     <span className="tq-muted">{tt('لم يُحلَّل بعد', 'Not analysed yet')}</span>
                   )}
 
-                  {post.url ? (
-                    <a href={post.url} target="_blank" rel="noopener noreferrer">
-                      {tt('فتح', 'Open')}
-                    </a>
-                  ) : null}
+                  {/* The foot of the card: the two things there are to do with
+                      the post itself. «فتح» leaves for Instagram; the Ask stays
+                      here and opens the chat already pointed at THIS row, by id.
+                      It sits at the inline end so it reads as the card's own
+                      affordance rather than as a second link in a list. */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+                    {post.url ? (
+                      <a href={post.url} target="_blank" rel="noopener noreferrer">
+                        {tt('فتح', 'Open')}
+                      </a>
+                    ) : null}
+                    <span style={{ marginInlineStart: 'auto' }}>
+                      <AskAbout
+                        scope={{ kind: 'post', post_id: post.id }}
+                        label={postName(post)}
+                      />
+                    </span>
+                  </div>
                 </Space>
               </Card>
             </Col>

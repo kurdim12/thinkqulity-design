@@ -53,7 +53,15 @@ function AntdShell({ children }: { children: React.ReactNode }) {
   dayjs.locale(locale === 'ar' ? 'ar' : 'en');
 
   return (
-    <ConfigProvider direction={dir} locale={locale === 'ar' ? arEG : enUS} theme={studioTheme}>
+    <ConfigProvider
+      direction={dir}
+      locale={locale === 'ar' ? arEG : enUS}
+      theme={studioTheme}
+      // One orchestrated moment per surface, and the receipt chip owns the only
+      // flourish. antd's click wave is a second, ambient one on every button in
+      // the product, so it is turned off at the root rather than fought locally.
+      wave={{ disabled: true }}
+    >
       <AntdApp>{children}</AntdApp>
     </ConfigProvider>
   );

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { registerHooks } from 'node:module';
 import type { LawReport, LawResult } from '../src/lib/brain/law/index.ts';
@@ -157,11 +157,14 @@ const {
   DEFAULT_ACTION_BUDGET,
   DEFAULT_PERIOD_DAYS,
   DEFAULT_THRESHOLDS,
+  JUDGEMENT_CORPORA,
   addDaysIso,
+  assessCoverage,
   collectMeasures,
   collectSourceKeys,
   daysBetweenIso,
   formatDelta,
+  observationDepth,
   renderStrategistBlocks,
   strategistEvidence,
 } = await import('../src/lib/agent/strategist/blocks.ts');
@@ -177,7 +180,10 @@ const { MAX_POSTS_SCAN, scanCoverage } = await import('../src/lib/audience/posts
 
 const strategist = await import('../src/lib/agent/features/strategist.ts');
 const {
+  NO_MODEL_RAN,
+  composeInsufficientPayload,
   decisionsDueForReview,
+  gapNote,
   strategistClaims,
   strategistPreflight,
   strategistResponseSchema,
@@ -287,6 +293,10 @@ function baseData(): StrategistData {
     },
     // comments is empty, so no audience insight exists.
     audience: null,
+    // The corpus, COUNTED — which is a different fact from "no insight was
+    // generated" and is the receipt probe 0 cites. Zero here is a measurement:
+    // the table was read and there was nothing in it.
+    comments_count: 0,
     content: { counts: { draft: 0, approved: 0, shipped: 0, rejected: 0 }, shipped: [] },
     ledger: [],
     meta: {
@@ -1407,6 +1417,270 @@ test(
 );
 
 /* ========================================================================= */
+/* PROBE 0 — the run cannot SEE anything, and says so instead of saying      */
+/* nothing happened.                                                         */
+/*                                                                           */
+/* NUMBERED 0 because it decides whether any WHEN above can apply at all;    */
+/* PLACED LAST because it reuses probe 3's and probe 6's fixtures, and a     */
+/* fixture referenced before its `const` is a trap this file does not need.  */
+/*                                                                           */
+/* IT GUARDS NO CLAUSE OF STRATEGIST_SYSTEM, and that is deliberate rather   */
+/* than an omission — it is why it is absent from TRIGGERED_RULES below. The  */
+/* other six probes guard rules the model is asked to follow. This one guards */
+/* a decision the model is never consulted about: whether the data it is      */
+/* about to be handed can support a judgement. Phase 0 established why. A     */
+/* digest RAN against this database and returned status quiet, the headline   */
+/* «لا جديد يستحق قرار» and empty lists — obeying the quiet rule exactly, over */
+/* post_analyses = 0, comments = 0 and profile_snapshots = 0. A prompt clause */
+/* would have been one more instruction to a model that was already following */
+/* its instructions correctly. The fix has to be code, upstream of the call.  */
+/* ========================================================================= */
+
+type StrategistAction = StrategistResponse['actions'][number];
+type HumanFlagAction = Extract<StrategistAction, { type: 'flag_needs_human' }>;
+type ComputationAction = Extract<StrategistAction, { type: 'request_computation' }>;
+
+const isFlag = (action: StrategistAction): action is HumanFlagAction =>
+  action.type === 'flag_needs_human';
+const isComputation = (action: StrategistAction): action is ComputationAction =>
+  action.type === 'request_computation';
+
+/** Any digit, Latin or Arabic-Indic. Prose a human reads may carry neither. */
+const ANY_DIGIT = /[\d٠-٩]/;
+
+test('probe 0 · premise — on the real state every judgement corpus is dark, and each gap cites what it can', () => {
+  const data = baseData();
+  const coverage = assessCoverage(data);
+  const keys = collectSourceKeys(data);
+
+  assert.equal(coverage.verdict, 'insufficient');
+  assert.deepEqual(
+    coverage.gaps.map((gap) => gap.corpus).sort(),
+    [...JUDGEMENT_CORPORA].sort(),
+    'the verdict is about all three corpora, not about whichever one was checked first',
+  );
+
+  const byCorpus = new Map(coverage.gaps.map((gap) => [gap.corpus, gap]));
+
+  // READ, AND THERE WAS NOTHING IN IT. A count of zero is a measurement and
+  // keeps its key, so these two gaps cite the line that proves them, verbatim.
+  assert.equal(byCorpus.get('post_analyses')?.state, 'absent');
+  assert.deepEqual(byCorpus.get('post_analyses')?.basis, [
+    { source_key: 'performance.analyses.count', value: '0' },
+  ]);
+  assert.equal(byCorpus.get('comments')?.state, 'absent');
+  assert.deepEqual(byCorpus.get('comments')?.basis, [
+    { source_key: 'audience.comments.count', value: '0' },
+  ]);
+
+  // AND THE THIRD CITES NOTHING, which is the honest shape rather than a
+  // missing one: no profile snapshot was ever recorded, that is rendered as an
+  // ABSENCE, and an absence emits no key. A receipt here could only name a key
+  // that resolves to a hole — the exact failure blocks.ts exists to prevent.
+  assert.equal(byCorpus.get('profile_snapshots')?.state, 'absent');
+  assert.deepEqual(byCorpus.get('profile_snapshots')?.basis, []);
+  assert.equal(keys.has('profiles.personal'), false);
+  assert.match(renderStrategistBlocks(data), /\(no measurement\) profiles\.personal —/);
+
+  // Every receipt that IS carried resolves against the keys the agent would
+  // have been shown, and holds the value those blocks rendered under it.
+  for (const gap of coverage.gaps) {
+    for (const ref of gap.basis) {
+      assert.ok(keys.has(ref.source_key), `${ref.source_key} was never emitted`);
+      assert.equal(valueOf(data, ref.source_key), ref.value);
+    }
+  }
+});
+
+test('probe 0 · premise — one live corpus flips the verdict, so this is about the data and not the fixture', () => {
+  // probe 3's week: both accounts observed TWICE, a week apart. That is one
+  // live judgement corpus — follower movement, measured and flat — so the same
+  // two dark corpora no longer add up to blindness, and probe 3's quiet digest
+  // is legitimate for exactly that reason. The real state has no such corpus.
+  const quiet = assessCoverage(quietData());
+  assert.equal(quiet.verdict, 'sufficient');
+  assert.deepEqual(
+    quiet.gaps.map((gap) => gap.corpus).sort(),
+    ['comments', 'post_analyses'],
+    'sufficient does not mean nothing is dark — it means something is not',
+  );
+  assert.equal(observationDepth(quietData().profiles.personal), 2);
+  assert.equal(observationDepth(baseData().profiles.personal), 0);
+
+  // ONE DATED OBSERVATION IS AS BLIND AS NONE, and is told apart from it: the
+  // fix for "never scraped" and the fix for "scraped once" are different
+  // sentences to the same person. CONSTRUCTED INPUT, same caveat as probe 3 —
+  // profile_snapshots is empty in the real database.
+  const observedOnce: StrategistData = {
+    ...baseData(),
+    profiles: {
+      personal: {
+        taken_on: SNAPSHOT_DAY,
+        followers: 900,
+        following: null,
+        posts_count: null,
+        previous: null,
+      },
+      academy: null,
+    },
+  };
+  const thin = assessCoverage(observedOnce);
+  assert.equal(thin.verdict, 'insufficient');
+  assert.equal(
+    thin.gaps.find((gap) => gap.corpus === 'profile_snapshots')?.state,
+    'too_thin',
+  );
+  assert.equal(observationDepth(observedOnce.profiles.personal), 1);
+
+  // AND NOT COUNTING A CORPUS IS NOT EVIDENCE THAT IT IS EMPTY. It is dark, it
+  // has its own state, and it emits no key — because "nobody looked" is not a
+  // measurement and must not be citable as one.
+  const uncounted: StrategistData = { ...baseData(), comments_count: undefined };
+  assert.equal(
+    assessCoverage(uncounted).gaps.find((gap) => gap.corpus === 'comments')?.state,
+    'uncounted',
+  );
+  assert.equal(collectSourceKeys(uncounted).has('audience.comments.count'), false);
+  assert.equal(collectSourceKeys(baseData()).has('audience.comments.count'), true);
+});
+
+test('probe 0 · gate — the composed payload is a real payload: the schema and the whole Law clear it', () => {
+  const data = baseData();
+  const composed = composeInsufficientPayload(data, assessCoverage(data));
+
+  // It is the SHIPPED response contract, not a special shape the screen has
+  // never met. `coverage` is stripped by the schema because the schema is the
+  // model's contract and the model does not write that field.
+  const check = strategistResponseSchema.safeParse(composed);
+  assert.equal(
+    check.success,
+    true,
+    check.success ? '' : JSON.stringify(check.error.issues),
+  );
+  if (!check.success) return;
+
+  // THIS ASSERTION IS WHAT REPLACES RUNNING THE LAW AT RUNTIME ON THIS PATH.
+  // No model authored any of this, so there is no author a violation could be
+  // sent back to — but "code cannot invent a number" is a claim, and here it is
+  // executed against the real source-key check and the real claims-linter over
+  // the real blocks.
+  const law = lawOf(check.data, data);
+  assert.deepEqual(law.violations, [], JSON.stringify(law.violations));
+  assert.equal(verdictOf(law, SOURCE_KEYS).passed, true);
+  assert.equal(verdictOf(law, CLAIMS_LINTER).passed, true);
+});
+
+test('probe 0 · gate — it is not a quiet digest, and every gap arrives with the one action that fills it', () => {
+  const data = baseData();
+  const coverage = assessCoverage(data);
+  const composed = composeInsufficientPayload(data, coverage);
+
+  // The whole point, asserted as the negative it is.
+  assert.notEqual(composed.status, 'quiet');
+  assert.equal(composed.status, 'material');
+  assert.equal(composed.coverage.verdict, 'insufficient');
+  assert.equal(composed.needs_human, true);
+  assert.notEqual(composed.headline_ar, 'لا جديد يستحق قرار');
+
+  // The escalation the screen renders above everything else, with its urgency
+  // and its receipts — and every receipt is one a gap actually carried.
+  const flags = composed.actions.filter(isFlag);
+  assert.equal(flags.length, 1);
+  assert.equal(flags[0].spec.urgency, 'this_week');
+  assert.deepEqual(
+    flags[0].spec.basis.map((ref) => ref.source_key).sort(),
+    ['audience.comments.count', 'performance.analyses.count'],
+  );
+
+  // One fill per gap, each addressed to a named human. Nothing here executes.
+  const fills = composed.actions.filter(isComputation);
+  assert.equal(fills.length, coverage.gaps.length);
+  for (const fill of fills) {
+    assert.equal(fill.owner, 'operator');
+    assert.ok(fill.spec.question_en.length > 0, 'a fill with no action is a complaint');
+    assert.ok(fill.spec.would_unlock_ar.length > 0, 'a fill that unlocks nothing is not a fill');
+  }
+
+  // Nothing was judged, and nothing was written to look like judgement.
+  assert.deepEqual(
+    [
+      composed.deltas,
+      composed.wins,
+      composed.concerns,
+      composed.corrections,
+      composed.decisions,
+      composed.ledger_review,
+    ],
+    [[], [], [], [], [], []],
+  );
+
+  // And every gap reaches the operator by name, with its state and its fix.
+  for (const gap of coverage.gaps) {
+    assert.ok(
+      composed.operator_notes.includes(gapNote(gap)),
+      `${gap.corpus} is missing from the operator notes`,
+    );
+  }
+});
+
+test('probe 0 · gate — the client line carries no chore and no digit, and no model produced any of it', () => {
+  const data = baseData();
+  const coverage = assessCoverage(data);
+  const composed = composeInsufficientPayload(data, coverage);
+
+  // The fills are the OPERATOR's scrapes and analyses. A client digest listing
+  // them would be this studio's chores sent out as if they were the client's.
+  for (const gap of coverage.gaps) {
+    assert.equal(composed.client_digest_ar.includes(gapNote(gap)), false);
+  }
+  assert.equal(digestLines(composed.client_digest_ar).length > 0, true);
+
+  // Every Arabic line a human reads here is digit-free, so nothing in it can be
+  // quoted as a measurement with no key behind it. Every figure this payload
+  // states lives in a `basis`, copied verbatim out of the blocks.
+  const prose = [
+    composed.headline_ar,
+    composed.client_digest_ar,
+    ...composed.actions.map((action) => action.do_ar),
+    ...composed.actions.filter(isFlag).map((action) => action.spec.reason_ar),
+    ...composed.actions.filter(isComputation).map((action) => action.spec.would_unlock_ar),
+  ];
+  for (const line of prose) {
+    assert.equal(ANY_DIGIT.test(line), false, `an unkeyed line carries a number: ${line}`);
+  }
+
+  // No model wrote a word of it, and the run reports that rather than naming a
+  // model it did not call. Hard rule 2: absent is an em-dash, never a stand-in.
+  assert.equal(NO_MODEL_RAN, '—');
+  assert.equal(ANY_DIGIT.test(NO_MODEL_RAN), false);
+});
+
+test('probe 0 · gate — a reader of the stored payload can tell the two apart; a reader of `status` cannot', () => {
+  const insufficient = composeInsufficientPayload(baseData(), assessCoverage(baseData()));
+  // A genuinely quiet week is probe 3's, and it is quiet because it HAS a live
+  // corpus to be quiet about.
+  const quiet = { ...parsed(quietPayload(QUIET_SHORT_DIGEST)), coverage: assessCoverage(quietData()) };
+
+  assert.equal(insufficient.coverage.verdict, 'insufficient');
+  assert.equal(quiet.coverage.verdict, 'sufficient');
+  assert.equal(quiet.status, 'quiet');
+
+  // AND THE STATUS COLUMN CANNOT CARRY THE DISTINCTION TODAY. Both of these are
+  // legal under `check (status in ('material','quiet'))` in 0003_strategist.sql,
+  // which is exactly why the distinction lives where the constraint does not
+  // gate it. A third status value is the better shape and needs migration 0009.
+  for (const row of [insufficient, quiet]) {
+    assert.ok(row.status === 'material' || row.status === 'quiet');
+  }
+
+  // The one digest already in the table predates this field, and its ABSENCE is
+  // the honest answer for it: nobody computed a verdict for that run, and
+  // back-filling one would invent the very thing the field exists to record.
+  const legacy: Record<string, unknown> = { ...parsed(quietPayload(QUIET_SHORT_DIGEST)) };
+  assert.equal('coverage' in legacy, false);
+});
+
+/* ========================================================================= */
 /* The probes against the spec.                                              */
 /* ========================================================================= */
 
@@ -1456,8 +1730,76 @@ test('every check the feature exports is one these probes actually run', () => {
   assert.ok(FEATURE_CHECKS.length > 0, 'at least one feature check is bound');
 });
 
+/* ========================================================================= */
+/* THE CONTROLS — hard rule 7, and the trap the digit scan above rests on.   */
+/* ========================================================================= */
+
+/** Every file this phase owns. Hard rule 7 binds to all of them, not to some. */
+const OWNED_FILES: readonly string[] = [
+  'src/lib/agent/features/strategist.ts',
+  'src/lib/agent/strategist/blocks.ts',
+  'src/app/api/digest/route.ts',
+  'scripts/demo-check.mjs',
+  'tests/strategist-probes.test.ts',
+];
+
+test('the control: the byte scan finds planted positives, then finds none in the files this phase owns', () => {
+  /* This project has TWICE produced a false clean scan from a pattern that
+   * itself carried a byte nobody could see, so the pattern is exercised against
+   * a CONTROL holding planted positives first. If the control finds nothing,
+   * the clean result below proves nothing at all. The three escapes are written
+   * as escapes, not as literal bytes — a test that planted a raw NUL in its own
+   * source would be the violation it is checking for. */
+  const FORBIDDEN = /[\p{Cc}\p{Cf}]/gu;
+  const ALLOWED = new Set(['\n', '\r', '\t']);
+  const ZWSP = '\u200B';
+  const RLM = '\u200F';
+  const NUL = '\u0000';
+
+  const control = `ok${ZWSP}here${RLM}and${NUL}a nul`;
+  const planted = [...control.matchAll(FORBIDDEN)].map((match) => match[0]);
+  assert.equal(planted.length, 3, 'THE CONTROL FAILED: a clean result below would mean nothing');
+  assert.deepEqual(planted, [ZWSP, RLM, NUL]);
+
+  // Arabic is why this matters here more than elsewhere: a stray RLM or LRM
+  // pasted beside an Arabic string is invisible in every editor and travels
+  // into the payload, the digest and the client's phone.
+  for (const file of OWNED_FILES) {
+    const text = readFileSync(fileURLToPath(new URL(`../${file}`, import.meta.url)), 'utf8');
+    const hits = [...text.matchAll(FORBIDDEN)]
+      .map((match) => match[0])
+      .filter((character) => !ALLOWED.has(character));
+    assert.deepEqual(
+      hits.map(
+        (character) =>
+          `U+${character.codePointAt(0)?.toString(16).toUpperCase().padStart(4, '0') ?? '????'}`,
+      ),
+      [],
+      `${file} carries an invisible character`,
+    );
+  }
+});
+
+test('the control: the digit scan DOES fire on a planted number in either script', () => {
+  // The planted positive behind "no unkeyed line carries a number" in probe 0.
+  // Without this, that assertion passing would be consistent with a regex that
+  // matches nothing.
+  assert.equal(ANY_DIGIT.test('في تراجع بسيط حوالي 25٪'), true);
+  assert.equal(ANY_DIGIT.test('عدد المتدربين ٣٤٠'), true);
+  assert.equal(ANY_DIGIT.test('لا يوجد ما يكفي للحكم بعد'), false);
+});
+
 /* ========================================================== what this found ==
- * TWO RULES ARE UNENFORCED, and the two [pending] probes name them:
+ * ONE RULE MOVED FROM UNENFORCED TO ENFORCED, and probe 0 is where it lives:
+ * "nothing moved" and "I cannot see" are now different answers, decided in code
+ * before any model call, recorded in `payload.coverage` on every stored digest,
+ * and answered — when every judgement corpus is dark — with a payload that
+ * names each dark corpus, the measure that proves it, and the one action that
+ * fills it. What that probe does NOT prove is that a real strategist, handed
+ * live corpora, produces a good digest; that is a claim about a model and it
+ * has not been observed here.
+ *
+ * TWO RULES ARE STILL UNENFORCED, and the two [pending] probes name them:
  *
  *   probe 2  corrections must LEAD the digest. Their PRESENCE is checked —
  *            ledgerReviewCheck() catches a due decision left unverdicted — but

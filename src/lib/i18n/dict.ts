@@ -25,6 +25,19 @@ export const dict = {
       high: 'Quality',
       signOut: 'Sign out',
       signedInAs: 'Signed in as',
+      /**
+       * THE ONLY PLACE THE PRODUCT DEFENDS ITSELF.
+       *
+       * Six screens used to carry a paragraph explaining what this app refuses
+       * to do — no send button, sends nothing, never connects, never writes.
+       * Said once it is a principle; said on every surface it is an apology,
+       * and it crowded out the copy that told an operator what to actually do.
+       * It now lives here, in a tag the width of two words, and every screen
+       * that repeated it has been cut back to its own job.
+       */
+      readOnly: 'Read-only',
+      readOnlyHint:
+        'Instagram is read, never written to. Everything made here is a draft you copy out and send yourself.',
     },
     common: {
       loading: 'Loading',
@@ -48,7 +61,7 @@ export const dict = {
     },
     seedWarning: {
       title: 'Running on seed data',
-      body: 'The Brand Brain still holds only the verified seed facts. Ingest a fresh Apify export on the Data screen to give the agent something real to reason from.',
+      body: 'The agent is reasoning from facts that were written by hand, not measured. One export on the Data screen replaces them with rows it can count.',
       cta: 'Go to Data',
     },
     grounding: { data: 'grounded in data', hypothesis: 'hypothesis' },
@@ -76,6 +89,9 @@ export const dict = {
       high: 'جودة عالية',
       signOut: 'تسجيل الخروج',
       signedInAs: 'مسجّل الدخول باسم',
+      readOnly: 'قراءة فقط',
+      readOnlyHint:
+        'نقرأ إنستغرام ولا نكتب فيه. كل ما يُصنَع هنا مسودّة تنسخها وترسلها بنفسك.',
     },
     common: {
       loading: 'جارٍ التحميل',
@@ -99,7 +115,7 @@ export const dict = {
     },
     seedWarning: {
       title: 'تعمل على بيانات أولية',
-      body: 'عقل العلامة لا يحتوي بعد سوى الحقائق الموثّقة الأولية. ارفع تصديرًا حديثًا من Apify في شاشة البيانات ليعمل الوكيل على بيانات حقيقية.',
+      body: 'يفكّر الوكيل انطلاقاً من حقائق مكتوبة بخط اليد، لا مقيسة. تصديرٌ واحد في شاشة البيانات يستبدل بها صفوفاً يستطيع عدّها.',
       cta: 'إلى شاشة البيانات',
     },
     grounding: { data: 'مبني على البيانات', hypothesis: 'فرضية' },

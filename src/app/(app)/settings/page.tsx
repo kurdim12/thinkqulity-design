@@ -88,7 +88,10 @@ export default function SettingsPage() {
     <div className="tq-page">
       <PageHeader
         title={t.nav.settings}
-        subtitle={tt('إعدادات التشغيل وصحة البيئة.', 'Operating configuration and environment health.')}
+        subtitle={tt(
+          'أي نموذج يُستخدم، ومن يستطيع الدخول، وهل البيئة سليمة.',
+          'Which model runs, who can sign in, and whether the environment is sound.',
+        )}
       />
 
       <Card title={tt('نموذج التوليد', 'Generation model')}>
@@ -182,19 +185,13 @@ export default function SettingsPage() {
         ) : error ? (
           <ErrorState error={error} hint={hint} onRetry={load} />
         ) : data ? (
-          <>
-            <div>
-              {data.features.map((feature) => (
-                <Tag key={feature}>{feature}</Tag>
-              ))}
-            </div>
-            <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBlockStart: 8 }}>
-              {tt(
-                'تُضاف القدرات بملف واحد في lib/agent/features ثم إدخال في السجل.',
-                'Features are added with one file in lib/agent/features plus a registry entry.',
-              )}
-            </Typography.Text>
-          </>
+          // The line under this list used to explain to the operator how a
+          // developer adds a feature. He is not the one adding it.
+          <div>
+            {data.features.map((feature) => (
+              <Tag key={feature}>{feature}</Tag>
+            ))}
+          </div>
         ) : null}
       </Card>
 

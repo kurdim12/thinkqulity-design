@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { App, Alert, Button, Col, DatePicker, Input, List, Popconfirm, Row, Switch, Tag } from 'antd';
+import { App, Button, Col, DatePicker, Input, List, Popconfirm, Row, Switch, Tag } from 'antd';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import dayjs, { type Dayjs } from 'dayjs';
@@ -84,9 +84,12 @@ export default function ReportsPage() {
       setReports((prev) => [res.persisted.report, ...(prev ?? [])]);
       setSelectedId(res.persisted.report.id);
       setWarnings(res.result.warnings ?? []);
+      // The model id was here. It answers a question the operator is not asking
+      // on this screen — what he needs to know is that it landed as a draft and
+      // that nothing is approved until he says so. Settings names the model.
       notification.success({
-        message: tt('تم إنشاء التقرير', 'Report generated'),
-        description: tt(`بواسطة النموذج ${res.model}`, `Generated with ${res.model}`),
+        message: tt('التقرير جاهز', 'The report is ready'),
+        description: tt('حُفظ مسودّة — راجعه ثم اعتمده.', 'Saved as a draft. Read it, then approve it.'),
       });
     } catch (err) {
       setGenError(describeError(err));
@@ -158,15 +161,10 @@ export default function ReportsPage() {
     <div className="tq-page">
       <PageHeader
         title={t.nav.reports}
-        subtitle={tt('تقرير شهري بالعربية، جاهز للمراجعة.', 'A monthly client report in Arabic, ready for your review.')}
-      />
-
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBlockEnd: 16 }}
-        message="لا يُرسل شيء للعميل إلا بموافقتك"
-        description={tt('هذه الشاشة تكتب وتراجع فقط. لا يوجد زر إرسال.', 'This screen only writes and reviews. There is no send button.')}
+        subtitle={tt(
+          'تقرير شهري بالعربية عن حساب واحد — تحرّره، وتعتمده، وترسله بنفسك.',
+          'A month of the account, written in Arabic. Edit it, approve it, send it yourself.',
+        )}
       />
 
       <div style={{ display: 'flex', gap: 8, marginBlockEnd: 16, flexWrap: 'wrap' }}>
@@ -177,7 +175,7 @@ export default function ReportsPage() {
       </div>
 
       {genError ? (
-        <ErrorState error={genError.message} hint={genError.hint} onRetry={undefined} />
+        <ErrorState error={genError.message} hint={genError.hint} onRetry={handleGenerate} />
       ) : null}
 
       {loading ? <LoadingBlock rows={6} /> : null}
@@ -185,8 +183,16 @@ export default function ReportsPage() {
 
       {!loading && !error && reports && reports.length === 0 ? (
         <EmptyState
-          description={tt('لم يُنشأ أي تقرير بعد.', 'No report has been generated yet.')}
-          actionLabel={tt('ولّد تقرير الشهر', "Generate this month's report")}
+          title={tt('لا تقارير بعد', 'No reports yet')}
+          description={tt(
+            'اختر شهراً واكتب أول تقرير: ما تحرّك في الحساب خلاله، ولماذا، وما التالي — بالعربية وجاهزاً للتحرير.',
+            'Pick a month and write the first one: what moved in the account, why, and what comes next — in Arabic, and yours to edit.',
+          )}
+          hint={tt(
+            'يقرأ الوكيل أحدث لقطة مخزّنة، ويكتب التقرير مسودّة — لقطة قديمة تُوقفه.',
+            'The agent reads the latest stored snapshot and writes a draft. A stale snapshot stops it.',
+          )}
+          actionLabel={tt('اكتب تقرير هذا الشهر', "Write this month's report")}
           onAction={handleGenerate}
         />
       ) : null}

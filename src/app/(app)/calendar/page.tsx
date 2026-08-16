@@ -161,8 +161,8 @@ export default function CalendarPage() {
       <PageHeader
         title={t.nav.calendar}
         subtitle={tt(
-          'الأفكار المعتمدة والمنشورة حسب أسبوعها المستهدف.',
-          'Approved and shipped concepts by their target week.',
+          'ما اعتمدته وما نشرته، على الأسبوع الذي أعطيته له.',
+          'What you approved and what you shipped, on the week you gave it.',
         )}
       />
 
@@ -183,10 +183,10 @@ export default function CalendarPage() {
               showIcon
               style={{ marginBlockEnd: 16 }}
               message={
-                <span>
+                <span dir="auto">
                   {tt(
-                    'لا توجد أفكار مجدولة لأسبوع بعد. اعتمد فكرة وحدّد أسبوعها المستهدف في شاشة الأفكار.',
-                    'No concepts are assigned to a week yet. Approve a concept and set its target week on the Concepts screen.',
+                    'التقويم فارغ حتى تُعطى فكرةٌ معتمدة أسبوعاً. حدّد الأسبوع المستهدف في شاشة الأفكار وستظهر هنا.',
+                    'The calendar stays empty until an approved concept has a week. Set a target week on Concepts and it lands here.',
                   )}{' '}
                   <Link href="/concepts">{t.nav.concepts}</Link>
                 </span>

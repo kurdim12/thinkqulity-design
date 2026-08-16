@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { HttpError } from '@/lib/auth';
 import { daysSince } from '@/lib/agent/context';
+import { MAX_SNAPSHOT_AGE_DAYS } from '@/lib/snapshots';
 import {
   reportResponseSchema,
   REPORT_SCHEMA_TEXT,
@@ -10,8 +11,13 @@ import {
 import type { ReportRow } from '@/lib/types/db';
 import { defineFeature } from './types';
 
-/** A report older than this describes a state of the world we can't vouch for. */
-export const MAX_SNAPSHOT_AGE_DAYS = 45;
+/**
+ * A report older than this describes a state of the world we can't vouch for.
+ * It now lives in src/lib/snapshots.ts — a pure module the dashboard can import
+ * without dragging the admin client into the browser bundle — and is re-exported
+ * here so every existing importer of this feature is unaffected.
+ */
+export { MAX_SNAPSHOT_AGE_DAYS };
 
 const inputSchema = z.object({
   /** First day of the month being reported on, ISO date. */

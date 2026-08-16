@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireOperator, errorResponse, HttpError } from '@/lib/auth';
+import { MissingEnvError } from '@/lib/env';
 import { readQuality } from '@/lib/prefs.server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { modelFor } from '@/lib/agent/client';
@@ -8,10 +9,13 @@ import { JUDGE_SYSTEM } from '@/lib/brain/judge';
 import { STRATEGIST_SYSTEM } from '@/lib/agent/strategist/system';
 import {
   LEDGER_SCAN,
+  assessCoverage,
   loadStrategistData,
   renderStrategistBlocks,
+  type StrategistCoverage,
 } from '@/lib/agent/strategist/blocks';
 import {
+  NO_MODEL_RAN,
   STRATEGIST_MAX_TOKENS,
   buildStrategistMessage,
   strategistFeature,
@@ -174,6 +178,88 @@ function estimateFor(model: string, agentPromptChars: number, blocksChars: numbe
   };
 }
 
+/**
+ * The estimate for a run that will call NO MODEL.
+ *
+ * `assessCoverage()` can already tell, from the loaded data and before a single
+ * token is spent, that every corpus a judgement rests on is dark — and the
+ * feature answers that case in code (see composeInsufficientPayload). Pricing
+ * the prompt that run will never send would over-state the ceiling by the whole
+ * of it, and rule 9 is not "produce a number", it is "know what you are about
+ * to spend".
+ *
+ * EVERY FIGURE HERE IS A MEASURED ZERO, not an absence dressed as one: zero
+ * agent calls, zero judge passes, zero characters sent, therefore zero tokens
+ * and zero dollars. Hard rule 2 forbids a zero standing in for something nobody
+ * measured; it does not forbid counting to zero. `unpriced_reason` is null
+ * because nothing here is unpriced — the rate table is simply not consulted,
+ * since no quantity it multiplies is non-zero. The model reads as an em-dash
+ * for the same reason it does everywhere else: none was chosen, because none
+ * will run.
+ */
+function noSpendEstimate(): DigestEstimate {
+  return {
+    model: NO_MODEL_RAN,
+    calls: { agent_ceiling: 0, judge_ceiling: 0 },
+    chars: {
+      agent_prompt: 0,
+      judge_prompt: 0,
+      candidate_allowance: 0,
+      judge_overhead_allowance: 0,
+    },
+    input_tokens_ceiling: 0,
+    output_tokens_ceiling: 0,
+    chars_per_token: CHARS_PER_TOKEN,
+    usd: 0,
+    rate_in_per_mtok: null,
+    rate_out_per_mtok: null,
+    unpriced_reason: null,
+  };
+}
+
+/* ------------------------------------------------- every failure names a fix -- */
+
+/**
+ * The fix line for a failure nobody classified.
+ *
+ * Every stage this route can reach either throws an HttpError carrying its own
+ * hint — the auth gate, the input schema, the preflight, the load, the model
+ * transport, the Judge, the digest write — or it is a bug. This is the sentence
+ * for the last case, and it exists because `errorResponse()` gives an
+ * unclassified error `hint: null`, which reaches the screen as a message with
+ * nothing to do about it. A card that says only "no" is the defect this phase
+ * is closing, and it is closed on the last path as well as the first.
+ */
+const UNCLASSIFIED_HINT =
+  'This failure was not classified, which is itself worth reporting. Reload the Digest screen: if a ' +
+  'new digest is at the top, the run finished and only the reply was lost; if the previous one is ' +
+  'still there, nothing was written and it is safe to run again. If it repeats, the path is ' +
+  'POST /api/digest → strategistFeature.run() in src/lib/agent/features/strategist.ts.';
+
+/**
+ * Guarantees the failure card has a cause AND a fix, whatever was thrown.
+ *
+ * The one non-generic branch is the commonest failure this route has: a run
+ * that reaches `runAgentJson` with no provider key configured throws a
+ * `MissingEnvError`, which is a plain Error and therefore arrived on screen with
+ * `hint: null`. Its message names the variable; the hint names where it is bound
+ * in production, which is the half the message cannot know.
+ */
+function withFix(err: unknown): unknown {
+  if (err instanceof HttpError) return err;
+  if (err instanceof MissingEnvError) {
+    return new HttpError(
+      500,
+      err.message,
+      `Locally: put ${err.key} in .env.local and restart the dev server. In production it is a ` +
+        `Worker secret — bind it with: wrangler secret put ${err.key}. Nothing was written, and the ` +
+        'digest that was already stored is untouched.',
+    );
+  }
+  const message = err instanceof Error ? err.message : 'Unexpected server error.';
+  return new HttpError(500, message, UNCLASSIFIED_HINT);
+}
+
 /* --------------------------------------------------------------- readiness -- */
 
 /** Whether a run would be refused, computed without spending anything. */
@@ -244,6 +330,7 @@ export async function GET(request: Request) {
     const wantsEstimate = new URL(request.url).searchParams.get('estimate') === '1';
     let estimate: DigestEstimate | null = null;
     let readiness: Readiness | null = null;
+    let coverage: StrategistCoverage | null = null;
 
     if (wantsEstimate) {
       // The defaults. A POST that overrides period_days or action_budget moves
@@ -257,16 +344,30 @@ export async function GET(request: Request) {
         actionBudget: input.action_budget,
       });
       readiness = readinessFrom(() => strategistPreflight(data));
+      // Reported under `?estimate=1` and not on a plain page load, for exactly
+      // the reason the estimate is: this needs `loadStrategistData()`, the
+      // heaviest read in the app. It is computed here rather than only inside
+      // the run so a caller can learn BEFORE clicking that the run will cost
+      // nothing and will answer with the blindness rather than with a digest.
+      coverage = assessCoverage(data);
 
-      const blocks = renderStrategistBlocks(data);
-      // The very string the run would send, so the measurement is of the thing
-      // being priced rather than of something shaped like it.
-      const message = buildStrategistMessage(blocks, input, data);
-      estimate = estimateFor(
-        modelFor(await readQuality()),
-        STRATEGIST_SYSTEM.length + message.length,
-        blocks.length,
-      );
+      if (coverage.verdict === 'insufficient') {
+        // `readiness.can_run` stays true on purpose. This is not a refusal —
+        // the run proceeds, costs nothing, and stores a record naming what is
+        // dark and what fills it. Refusing here would leave the operator with
+        // an error card and no way to produce the record.
+        estimate = noSpendEstimate();
+      } else {
+        const blocks = renderStrategistBlocks(data);
+        // The very string the run would send, so the measurement is of the
+        // thing being priced rather than of something shaped like it.
+        const message = buildStrategistMessage(blocks, input, data);
+        estimate = estimateFor(
+          modelFor(await readQuality()),
+          STRATEGIST_SYSTEM.length + message.length,
+          blocks.length,
+        );
+      }
     }
 
     return NextResponse.json({
@@ -280,10 +381,19 @@ export async function GET(request: Request) {
       due_for_review: decisions.filter((d) => d.past_review).length,
       today,
       readiness,
+      /**
+       * Whether a run could see anything, and which corpora are dark. Null on a
+       * plain page load — it was not computed, which is a different fact from
+       * "nothing is dark" and is reported as one.
+       */
+      coverage,
       estimate,
     });
   } catch (err) {
-    return errorResponse(err);
+    // `?estimate=1` is a CLICK — the screen calls it before offering to spend —
+    // so a failure here ends a run the operator started and has to say what to
+    // do about it, exactly like the POST below.
+    return errorResponse(withFix(err));
   }
 }
 
@@ -292,10 +402,11 @@ export async function GET(request: Request) {
 /**
  * POST /api/digest — run the strategist over the period ending today.
  *
- * The body is passed to the feature untouched: it owns its own input contract,
- * refuses invalid bodies with a 400, and refuses runs with nothing to report
- * with a 409 — both BEFORE any model call. The response is the standard feature
- * outcome (result, persisted, brain) plus nothing this route invented.
+ * The body is passed to the feature: it owns its own input contract, refuses
+ * invalid bodies with a 400, refuses runs with nothing to report at all with a
+ * 409, and answers a run that cannot SEE anything with an insufficient-data
+ * digest — all three BEFORE any model call. The response is the standard
+ * feature outcome (result, persisted, brain) plus nothing this route invented.
  *
  * What comes back describes REQUESTS. `persisted.actions_executed` is false and
  * always will be from this path: `generate_concepts` is a request routed by a
@@ -305,12 +416,39 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     await requireOperator();
-    const body: unknown = await request.json().catch(() => ({}));
+
+    /**
+     * A BODY THAT DID NOT PARSE IS NOT AN EMPTY BODY.
+     *
+     * This was `request.json().catch(() => ({}))`, which turned a malformed
+     * body into a default run: the caller asked for one thing, got another, and
+     * was told it succeeded. The two cases are separated here. No body at all —
+     * which is a legitimate way to ask for the defaults — is `{}`. A body that
+     * is present and unparseable is a 400 that says so, because silently
+     * running something else is the quiet kind of wrong this app refuses.
+     */
+    const raw = (await request.text()).trim();
+    let body: unknown = {};
+    if (raw.length > 0) {
+      try {
+        body = JSON.parse(raw) as unknown;
+      } catch (parseError) {
+        throw new HttpError(
+          400,
+          `The request body is not valid JSON, so no run was started: ${
+            parseError instanceof Error ? parseError.message : 'unparseable'
+          }`,
+          'Send no body at all to run with the defaults, or send a JSON object with any of ' +
+            '`period_days`, `action_budget` and `note`.',
+        );
+      }
+    }
+
     const quality = await readQuality();
 
-    const outcome = await strategistFeature.run(body ?? {}, quality);
+    const outcome = await strategistFeature.run(body, quality);
     return NextResponse.json(outcome);
   } catch (err) {
-    return errorResponse(err);
+    return errorResponse(withFix(err));
   }
 }

@@ -396,19 +396,8 @@ export default function CompliancePage() {
       <PageHeader
         title={tt('فاحص الالتزام', 'Compliance Checker')}
         subtitle={tt(
-          'الصق أي نص — يُفحص مقابل دليل العلامة وقوانين الدماغ.',
-          "Paste any text — checked against the brand guideline and the brain's laws.",
-        )}
-      />
-
-      <Alert
-        type="warning"
-        showIcon
-        style={{ marginBlockEnd: 16 }}
-        message={tt('نص فقط في هذه النسخة', 'Text only in this version')}
-        description={tt(
-          'لا تُفحص التصاميم النهائية أو الصور — فقط النص.',
-          'Finished visuals and images are not checked — text only.',
+          'الصق نصاً ليمرّ على دليل العلامة وعلى القانون، ويعود بحكم وأدلّته. النص وحده — لا الصور.',
+          "Paste text and it goes through the brand guideline and the Law, then comes back with a verdict and the evidence for it. Text only, not images.",
         )}
       />
 
@@ -742,7 +731,14 @@ export default function CompliancePage() {
       {loading ? <LoadingBlock rows={4} /> : null}
       {!loading && error ? <ErrorState error={error.message} hint={error.hint} onRetry={load} /> : null}
       {!loading && !error && history && history.length === 0 ? (
-        <EmptyState description={tt('لا يوجد سجل فحص بعد.', 'No check history yet.')} />
+        <EmptyState
+          title={tt('لا فحوصات بعد', 'Nothing checked yet')}
+          description={tt(
+            'كل فحص يبقى هنا بحكمه ودرجته ومقتطفه، فيمكنك فتحه من جديد ومقارنة صياغتين على القانون نفسه.',
+            'Every check stays here with its verdict, its score and its excerpt, so you can reopen one and put two wordings through the same Law.',
+          )}
+          hint={tt('الصق نصاً في الأعلى واضغط فحص.', 'Paste text above and press Check.')}
+        />
       ) : null}
       {!loading && !error && history && history.length > 0 ? (
         <Table<ComplianceHistoryRow>

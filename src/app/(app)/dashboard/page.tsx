@@ -15,6 +15,7 @@ import {
   LoadingBlock,
 } from '@/components/ui';
 import { formatDate, formatNumber, formatSignedNumber } from '@/lib/date';
+import { MAX_SNAPSHOT_AGE_DAYS } from '@/lib/snapshots';
 import { GOLD } from '@/lib/theme';
 import { distinctPosts } from '@/lib/audience/posts';
 import { buildTiming, toLocalCell, HOURS_PER_DAY, type TimingResult } from '@/lib/audience/timing';
@@ -474,7 +475,8 @@ export default function DashboardPage() {
   const { brand, snapshot, days_since_snapshot, top_posts, concept_counts } = data;
   const stats = snapshot?.stats ?? null;
   const diff = stats?.diff_vs_prev ?? null;
-  const daysWarning = days_since_snapshot !== null && days_since_snapshot > 45;
+  // The same constant the report feature refuses on, not a second copy of 45.
+  const daysWarning = days_since_snapshot !== null && days_since_snapshot > MAX_SNAPSHOT_AGE_DAYS;
 
   // The headline ratio, only when both sides are real measurements.
   const personalAvg = engagement?.personal.avg ?? null;
@@ -572,11 +574,12 @@ export default function DashboardPage() {
           population.posts.length === 0 ||
           engagement === null ? (
           <EmptyState
+            title={tt('لا منشورات مخزّنة', 'No posts stored')}
             description={tt(
-              'لا توجد منشورات مخزّنة، فلا يوجد متوسط يُحسب.',
-              'No posts are stored, so there is no average to compute.',
+              'مع أول تصدير تقرأ هنا متوسط التفاعل لكل حساب، وعدد المنشورات وراء كل متوسط، والفارق بين الشخصي والأكاديمية.',
+              'With the first export this reads out the average engagement per account, how many posts each average rests on, and how far the personal account sits from the academy.',
             )}
-            actionLabel={tt('رفع تصدير Apify', 'Upload an Apify export')}
+            actionLabel={tt('ارفع تصدير Apify', 'Ingest an Apify export')}
             href="/data"
           />
         ) : (
@@ -683,10 +686,12 @@ export default function DashboardPage() {
             />
             {daysWarning ? (
               <div className="tq-muted" style={{ marginBlockStart: 4, fontSize: 12 }}>
-                {tt(
-                  'التقرير الشهري يرفض بيانات أقدم من ٤٥ يومًا',
-                  'Monthly reports refuse data older than 45 days',
-                )}
+                {/* The figure is read from the rule itself and is LTR-isolated
+                    like every other number on this page, rather than typed into
+                    a sentence where it can quietly stop being true. */}
+                {tt('التقرير الشهري يرفض لقطة أقدم من ', 'A monthly report refuses a snapshot older than ')}
+                <span className="tq-num">{formatNumber(MAX_SNAPSHOT_AGE_DAYS)}</span>
+                {tt(' يوماً. شغّل مسحاً جديداً.', ' days. Run a fresh scrape.')}
               </div>
             ) : null}
           </Card>
@@ -695,29 +700,22 @@ export default function DashboardPage() {
 
       <p className="tq-muted" style={{ fontSize: 12, marginBlockStart: 8, marginBlockEnd: 0 }}>
         {tt(
-          'أعداد المتابعين تأتي من أحدث صف في profile_snapshots ومعها تاريخها دائماً. رقم المتابعين المحفوظ في عقل العلامة نصٌّ أولي وليس قياساً — يبقى هناك كسجل ولا يُعرض هنا.',
-          'Follower counts come from the latest profile_snapshots row and always carry their date. The follower figure kept in the Brand Brain is a seeded string, not a measurement — it stays there as history and is never shown here.',
+          'كل عدد متابعين هنا يأتي من لقطة بروفايل ويحمل تاريخها. الرقم المكتوب في عقل العلامة نصٌّ أوّلي لا قياس، فيبقى هناك سجلاً ولا يظهر في هذه البطاقات.',
+          'Every follower count here comes from a profile snapshot and carries its date. The figure written into the Brand Brain is seeded prose, not a measurement, so it stays there as history and never appears on these cards.',
         )}
       </p>
 
       {/* ----------------------------- timing -----------------------------
-          The link used to read "Full timing report", which claimed this card was
-          a preview of /audience. It is not, and cannot be made into one from
-          here: this card recomputes live over ONE snapshot's posts (the only
-          population `/api/snapshots/{id}/posts` can return), while /audience
-          renders the `timing` jsonb that was STORED when the audience analysis
-          was last generated, over every post row in the table across all
-          snapshots. Different population and different moment — so the card now
-          names its own coverage in the title and states the difference below,
-          instead of implying the two agree. */}
+          The link out of here used to name the Audience screen, and v6 deleted
+          that screen — /audience now redirects to Board, which is not where the
+          stored timing report lives. A link whose label promises one surface and
+          whose href lands on another is worse than no link, so it is gone; the
+          card states its own coverage instead of pointing at a report it cannot
+          vouch for. This card recomputes live over ONE snapshot's posts, which
+          is the only population `/api/snapshots/{id}/posts` can return. */}
       <Card
         title={tt('أفضل أوقات النشر — أحدث لقطة', 'Best posting windows — latest snapshot')}
         style={{ marginBlockStart: 16 }}
-        extra={
-          <Link href="/audience">
-            {tt('تقرير التوقيت في شاشة الجمهور', 'Timing report on Audience')}
-          </Link>
-        }
       >
         {postsLoading ? (
           <LoadingBlock rows={2} />
@@ -732,11 +730,12 @@ export default function DashboardPage() {
           timing === null ||
           hourly === null ? (
           <EmptyState
+            title={tt('لا منشورات مخزّنة', 'No posts stored')}
             description={tt(
-              'لا توجد منشورات مخزّنة، فلا يمكن حساب أي نمط توقيت.',
-              'No posts are stored, so no timing pattern can be computed.',
+              'يُحسب التوقيت من وقت النشر مضروباً في التفاعل: اليوم كلّه ساعةً ساعة، وأيّ ساعة تستحق النشر فيها فعلاً.',
+              'Timing is computed from publish time against engagement: the whole day, hour by hour, and which hours are actually worth posting in.',
             )}
-            actionLabel={tt('رفع تصدير Apify', 'Upload an Apify export')}
+            actionLabel={tt('ارفع تصدير Apify', 'Ingest an Apify export')}
             href="/data"
           />
         ) : timing.total_n === 0 ? (
@@ -965,17 +964,16 @@ export default function DashboardPage() {
               )}
             </div>
 
-            {/* Exactly what this card covers, so the link beside the title is
-                read as a different report rather than a fuller version of this
-                one. */}
+            {/* Exactly what this card covers, so a different figure elsewhere
+                reads as a different population rather than a contradiction. */}
             <div className="tq-muted" style={{ fontSize: 12, marginBlockStart: 4 }}>
-              {tt('تغطي هذه البطاقة منشورات لقطة', 'This card covers only the posts in the')}{' '}
+              {tt('من منشورات لقطة', 'From the posts in the')}{' '}
               <span className="tq-num">
                 {snapshot === null ? '—' : formatDate(snapshot.taken_on, locale)}
               </span>{' '}
               {tt(
-                'وحدها. أما تقرير التوقيت في شاشة الجمهور فيُحسب على كل صفوف المنشورات عبر كل اللقطات، ويُحفظ لحظة إنشاء تحليل الجمهور — فقد يختلف الرقمان، وهذا ليس خطأً في أحدهما.',
-                'snapshot. The timing report on the Audience screen is computed over every post row across all snapshots, and is stored at the moment the audience analysis is generated — so the two can differ, and neither is wrong.',
+                'وحدها — ولقطة أخرى تعطي أرقاماً أخرى دون أن يكون أحدهما خطأً.',
+                'snapshot alone — another snapshot gives other figures, and neither is wrong.',
               )}
             </div>
           </>
@@ -989,8 +987,12 @@ export default function DashboardPage() {
       >
         {diff === null ? (
           <EmptyState
-            description={tt('لا توجد لقطة سابقة للمقارنة.', 'No previous snapshot to compare against.')}
-            actionLabel={tt('رفع تصدير', 'Upload an export')}
+            title={tt('لقطة واحدة فقط حتى الآن', 'Only one snapshot so far')}
+            description={tt(
+              'الحركة تحتاج قياسين. مع اللقطة الثانية يظهر هنا ما جدّ من منشورات وكيف تحرّك متوسط التفاعل في كل حساب.',
+              'Movement needs two readings. Once a second snapshot exists, this shows what was published in between and how the average for each account moved.',
+            )}
+            actionLabel={tt('ارفع تصديراً جديداً', 'Ingest a newer export')}
             href="/data"
           />
         ) : (
@@ -1024,8 +1026,12 @@ export default function DashboardPage() {
       <Card title={tt('أعلى ٥ منشورات', 'Top 5 posts')} style={{ marginBlockStart: 16 }}>
         {top_posts.length === 0 ? (
           <EmptyState
-            description={tt('لم يتم رفع أي تصدير بعد.', 'No export has been ingested yet.')}
-            actionLabel={tt('رفع تصدير Apify', 'Upload an Apify export')}
+            title={tt('لا منشورات بعد', 'No posts yet')}
+            description={tt(
+              'أعلى المنشورات تفاعلاً، ومعها الإعجابات والتعليقات ومقتطف النص ورابط المنشور نفسه.',
+              'The posts that pulled the most engagement, with their likes, comments, a slice of the caption, and a link to the post itself.',
+            )}
+            actionLabel={tt('ارفع تصدير Apify', 'Ingest an Apify export')}
             href="/data"
           />
         ) : (

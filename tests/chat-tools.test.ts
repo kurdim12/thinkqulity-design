@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { BrandRow, PostRow, ProfileSnapshotRow } from '../src/lib/types/db.ts';
+import type { BrandRow, KnowledgeDoc, PostRow, ProfileSnapshotRow } from '../src/lib/types/db.ts';
 
 /* =============================================================== what this ==
  * The chat agent's whole reach into this studio is five tools. Four properties
@@ -185,6 +185,34 @@ const BRAND: BrandRow = {
   status: 'live',
   updated_at: new Date(0).toISOString(),
 };
+
+/**
+ * One of Ahmad's own decks, exactly as `npm run ingest:knowledge` files it into
+ * `brand.knowledge`.
+ *
+ * IT CARRIES A LARGE NUMBER ON PURPOSE. 340 clears the claims-linter's claim
+ * floor, so it is precisely the figure that has to travel to the model VERBATIM
+ * — a redacted quotation is not the quotation — and still be structurally
+ * incapable of becoming a measurement about these accounts.
+ */
+const DECK_NUMBER = '340';
+
+const DECK_TEXT = [
+  'الموقع: أكاديمية تدريب في عمّان، والوعد إن المتدرّب يطلع بمهارة يستعملها بكرة.',
+  'الصوت: قريب، مش رسمي، بيحكي مع الواحد مش عنه.',
+  `ادّعاء من الورشة: التفاعل ارتفع ${DECK_NUMBER} بالمية بعد إعادة صياغة العناوين.`,
+].join('\n');
+
+const DECK: KnowledgeDoc = {
+  title: 'ورشة الهوية',
+  source: 'workshop-identity.pdf',
+  kind: 'workshop_material',
+  content: DECK_TEXT,
+};
+
+/** A Canon chunk as `retrieveCanon` returns one: verbatim, with its document. */
+const CANON_TEXT =
+  'A voice section names the register, lists the words the brand does not use, and shows rewrites side by side.';
 
 const SNAPSHOT = { id: 'snap-1', taken_on: '2026-08-14' };
 
@@ -421,15 +449,31 @@ dbStub.__setDb(() => fakeDb);
 const { MissingEnvError } = await import('../src/lib/env.ts');
 
 const {
+  CHAT_LINKS,
   CHAT_TOOL_NAMES,
   CHAT_DISPATCHABLE,
   CHAT_DISPATCH_TOOL,
+  chatLinkValues,
+  chatSurfaceLink,
   chatToolSpecs,
   createChatToolExecutor,
   isChatToolName,
   isDispatchable,
   loadAudienceCorpus,
 } = await import('../src/lib/agent/chat/tools.ts');
+
+/* The REAL composition the gate performs on a tool result, imported rather than
+ * re-derived: `toolValues` is what fills the substitution engine's value map and
+ * `lintEvidence` is what fills the claims-linter's context. Asserting against a
+ * hand-rolled copy of either would be asserting against a copy. */
+const { lintEvidence, toolValues } = await import('../src/lib/agent/chat/run.ts');
+
+/* The engine and the map builder, unstubbed. A link that "resolves" is a link
+ * this code actually substituted. */
+const { buildValueMap } = await import('../src/lib/agent/strategist/blocks.ts');
+const { REDACTED, substitute } = await import('../src/lib/brain/substitute.ts');
+const { wholeQuantity } = await import('../src/lib/brain/law/claims-linter.ts');
+const { SURFACES, surfaceFor } = await import('../src/lib/nav.ts');
 
 const { STAT_LOOKUP_NAMES, isStatLookupName, runStatLookup, statLookupCatalogue } = await import(
   '../src/lib/agent/chat/stats.ts'
@@ -459,15 +503,21 @@ interface Recorder {
   featureCalls: { id: string; input: unknown }[];
   judgeCalls: number;
   canonCalls: number;
+  /** What the ONE retriever was actually asked, so a re-query would be visible. */
+  canonQueries: { query: string; tags: readonly string[] | null; k: number | null }[];
   /** Dispatcher steps, in order, so "reserve came first" is checkable. */
   dispatchOps: string[];
 }
 
-let recorder: Recorder = { featureCalls: [], judgeCalls: 0, canonCalls: 0, dispatchOps: [] };
+function freshRecorder(): Recorder {
+  return { featureCalls: [], judgeCalls: 0, canonCalls: 0, canonQueries: [], dispatchOps: [] };
+}
+
+let recorder: Recorder = freshRecorder();
 
 function reset(): void {
   state = freshState();
-  recorder = { featureCalls: [], judgeCalls: 0, canonCalls: 0, dispatchOps: [] };
+  recorder = freshRecorder();
   agentStub.__resetModelCalls();
   delete process.env.CHAT_DAILY_GENERATION_CAP;
 }
@@ -628,15 +678,23 @@ async function callTool(
 
 /* ====================================================== 1. the closed lists ==*/
 
-test('the surface is exactly six tools, and they are the tuple', () => {
-  /* FIX 4: `get_external_facts` is wired in, deliberately making this six —
-   * not a drift the count silently absorbed. Before the fix this asserted
-   * five and passed, which was itself the defect: rule 21's model-facing half
-   * governed a tool the surface never actually exposed. */
+test('the surface is exactly seven tools, and they are the tuple', () => {
+  /* THE COUNT IS RAISED DELIBERATELY, TWICE OVER NOW, AND THE HISTORY IS THE
+   * POINT OF KEEPING IT.
+   *
+   * FIX 4 made it six by wiring `get_external_facts` in. Before that fix this
+   * asserted five and passed, which was itself the defect: rule 21's
+   * model-facing half governed a tool the surface never actually exposed.
+   *
+   * v6 makes it seven by adding `get_knowledge`. That is a REACH the surface did
+   * not have — the chat could name the decks by filename and read none of them
+   * (`renderStrategistBlocks` emits `doc.source` and no content) — so the number
+   * moving is the whole diff a reviewer should be made to look at. A count that
+   * silently absorbed a new tool would be a count worth nothing. */
   reset();
   const specs = chatToolSpecs();
-  assert.equal(specs.length, 6, 'the chat surface is deliberately six tools wide');
-  assert.equal(CHAT_TOOL_NAMES.length, 6);
+  assert.equal(specs.length, 7, 'the chat surface is deliberately seven tools wide');
+  assert.equal(CHAT_TOOL_NAMES.length, 7);
   assert.deepEqual(
     specs.map((spec) => spec.name),
     [...CHAT_TOOL_NAMES],
@@ -647,10 +705,11 @@ test('the surface is exactly six tools, and they are the tuple', () => {
     'get_brand',
     'run_compliance',
     'get_external_facts',
+    'get_knowledge',
     'dispatch_feature',
   ]);
-  // No duplicate hiding a seventh behind a repeated name.
-  assert.equal(new Set(specs.map((spec) => spec.name)).size, 6);
+  // No duplicate hiding an eighth behind a repeated name.
+  assert.equal(new Set(specs.map((spec) => spec.name)).size, 7);
 });
 
 test('an unknown tool name resolves to nothing — including the inherited keys', async () => {
@@ -965,13 +1024,28 @@ test('with no snapshot, search_posts reports an absence rather than an empty res
 test('dispatch_feature is published from the dispatcher, not re-declared here', () => {
   reset();
   const spec = chatToolSpecs().find((each) => each.name === CHAT_DISPATCH_TOOL);
-  assert.ok(spec, 'the fifth tool is on the surface');
+  assert.ok(spec, 'the dispatcher is on the surface');
 
-  /* The spec must be the dispatcher's own, field for field. A second
-   * description maintained here would drift from the code that actually
-   * enforces the cap, and the model would be told rules nothing applies. */
-  assert.deepEqual(spec, dispatchSpec());
+  /* The spec must be the dispatcher's own. A second description maintained here
+   * would drift from the code that actually enforces the cap, and the model
+   * would be told rules nothing applies.
+   *
+   * THE ONE THING tools.ts ADDS IS THE LINK CONTRACT, and it is asserted as an
+   * APPENDED SUFFIX rather than waved through: the dispatcher's text is intact,
+   * character for character, and what follows it is the same section every other
+   * spec carries. Anything else this file tried to edit into a description it
+   * does not own would fail here. */
   assert.equal(spec.name, 'dispatch_feature');
+  assert.deepEqual(spec.parameters, dispatchSpec().parameters);
+  assert.ok(
+    spec.description.startsWith(dispatchSpec().description),
+    "the dispatcher's own description is carried verbatim",
+  );
+
+  const suffix = spec.description.slice(dispatchSpec().description.length);
+  for (const other of chatToolSpecs()) {
+    assert.ok(other.description.endsWith(suffix), `${other.name} carries the same link contract`);
+  }
 });
 
 test('dispatch_feature refuses a feature outside the allow-list, and runs nothing', async () => {
@@ -1287,6 +1361,381 @@ test('a get_brand section returns its own source, and withholds the palette hexe
 
   const bad = await callTool('get_brand', { section: 'everything' });
   assert.equal(bad.refusal, 'invalid_arguments');
+});
+
+/* ================================================ 8b. get_knowledge, the reach
+ *
+ * The tool exists because the chat could NAME the decks and read none of them:
+ * `renderStrategistBlocks` emits `brand.knowledge.<title> = "<filename>"` and no
+ * content at all. These tests assert the two halves of the fix — that the
+ * material now comes back verbatim WITH its attribution, and that no amount of
+ * it can turn into a number about these accounts.
+ * ========================================================================== */
+
+/** The Canon half, injected — retrieval embeds, and nothing here may reach out. */
+function canonWith(text: string): CanonRetriever {
+  return async (query, opts) => {
+    recorder.canonCalls += 1;
+    recorder.canonQueries.push({ query, tags: opts.tags ?? null, k: opts.k ?? null });
+    return [
+      {
+        chunkId: 'chunk-7',
+        documentId: 'doc-3',
+        documentTitle: 'Guideline anatomy',
+        sourceUrl: 'https://example.org/anatomy',
+        kind: 'guideline_structure',
+        licenseNote: 'quoted with attribution',
+        tags: ['voice', 'structure'],
+        content: text,
+        score: 0.812_5,
+        method: 'lexical',
+      },
+    ];
+  };
+}
+
+/** Installs the deck fixture on the brand row for one test. */
+function withDeck(): void {
+  state.rows.brand = [{ ...BRAND, knowledge: [DECK] }];
+}
+
+test('get_knowledge returns the decks and the Canon VERBATIM, each with its attribution', async () => {
+  reset();
+  withDeck();
+
+  const execute = createChatToolExecutor(deps({ retrieveCanon: canonWith(CANON_TEXT) }));
+  const result = await execute({
+    id: 'c1',
+    name: 'get_knowledge',
+    arguments: JSON.stringify({ about: 'brand voice and tone', tags: ['voice'] }),
+  });
+
+  const payload = JSON.parse(result.content) as Record<string, unknown>;
+
+  /* THE DECK, CHARACTER FOR CHARACTER. Not "contains", not "starts with": the
+   * whole document as it was stored, because a summarised source is a source
+   * nobody can check. */
+  const documents = payload.documents as Record<string, unknown>[];
+  assert.equal(documents.length, 1);
+  assert.equal(documents[0].text, DECK_TEXT);
+  assert.equal(documents[0].truncated, false);
+
+  // WITH ITS ATTRIBUTION — the title, the file it came out of, what kind of
+  // thing it is. `source` is the same string the blocks tell the agent to cite.
+  assert.equal(documents[0].title, DECK.title);
+  assert.equal(documents[0].source, DECK.source);
+  assert.equal(documents[0].kind, DECK.kind);
+
+  const passages = payload.passages as Record<string, unknown>[];
+  assert.equal(passages.length, 1);
+  assert.equal(passages[0].text, CANON_TEXT);
+  assert.equal(passages[0].chunk_id, 'chunk-7');
+  assert.equal(passages[0].document_title, 'Guideline anatomy');
+  assert.equal(passages[0].source_url, 'https://example.org/anatomy');
+  assert.equal(passages[0].license_note, 'quoted with attribution');
+  // "lexical" is a weaker match than "vector" and the payload says which it was.
+  assert.equal(passages[0].method, 'lexical');
+
+  // The ONE retriever was called with what the model asked for — no second
+  // ranking function, no re-query, no widening of the tags.
+  assert.equal(recorder.canonCalls, 1);
+  assert.deepEqual(recorder.canonQueries, [
+    { query: 'brand voice and tone', tags: ['voice'], k: 5 },
+  ]);
+
+  // Nothing was written and no model was reached.
+  assert.equal(state.inserts.length, 0);
+  assert.equal(agentStub.__modelCalls(), 0);
+});
+
+test('a deck number cannot become a measure — it travels whole and sources nothing', async () => {
+  reset();
+  withDeck();
+
+  const execute = createChatToolExecutor(deps({ retrieveCanon: canonWith(CANON_TEXT) }));
+  const result = await execute({
+    id: 'c1',
+    name: 'get_knowledge',
+    arguments: JSON.stringify({ about: 'what the workshop claims' }),
+  });
+
+  /* FIRST: THE NUMBER IS REALLY THERE. Safety by redaction would be a different
+   * (and worse) design — the claim is that an UNREDACTED deck figure still
+   * cannot become a measurement, and this is what makes that claim non-vacuous. */
+  assert.ok(result.content.includes(DECK_NUMBER), 'the claim reaches the model verbatim');
+
+  /* SECOND: THE ENVELOPE DECLARES NOTHING. Not "declares nothing about numbers"
+   * — nothing at all, including the surface links every other result carries.
+   * `sealExternalResult` admits the empty array and no other value. */
+  assert.deepEqual(result.sourced, []);
+  assert.equal(result.source_keys, undefined);
+
+  /* THIRD: THE TWO REAL COMPOSITIONS THE GATE PERFORMS.
+   *
+   * `toolValues` is what fills the substitution engine's value map, and
+   * `lintEvidence` is what fills the claims-linter's context. Both are imported
+   * from the gate rather than restated, so this is the production pipeline
+   * answering, not a model of it. */
+  assert.deepEqual(toolValues(result), [], 'no key, so no placeholder can resolve to it');
+  assert.equal(lintEvidence(result), '', 'no evidence, so no typed figure can trace to it');
+
+  /* FOURTH: COMPOSE RULE 20 WITH RULE 21 AND EXECUTE THE RESULT. There is no key
+   * to substitute and no evidence to type against, so a draft that states the
+   * deck's figure is refused by the REAL engine — twice over, once for each
+   * spelling a model might reach for. */
+  const values = buildValueMap(toolValues(result));
+  assert.equal(values.size, 0);
+
+  for (const draft of [
+    `الورشة بتقول إن التفاعل ارتفع ${DECK_NUMBER} بالمية.`,
+    'الورشة بتقول إن التفاعل ارتفع ٣٤٠ بالمية.',
+  ]) {
+    const attempt = substitute(draft, values);
+    assert.equal(attempt.deliverable, false, `"${draft}" must not be deliverable`);
+    assert.ok(
+      attempt.violations.some((violation) => violation.kind === 'bare-quantity'),
+      'a deck figure typed into a reply is a bare quantity, whatever script it wears',
+    );
+  }
+
+  // And no placeholder can name it either: there is no key in the result at all,
+  // so every spelling of one redacts.
+  const named = substitute('{{brand.knowledge.workshop_identity}}', values);
+  assert.equal(named.deliverable, false);
+  assert.equal(named.violations[0].kind, 'unknown-key');
+  assert.ok(named.final.includes(REDACTED));
+});
+
+test('an absent store is an absence that says what would fill it, never an empty answer', async () => {
+  reset();
+  // BRAND ships with `knowledge: []` and the injected Canon returns nothing —
+  // which is this deployment's actual state, not a contrived edge case.
+  const execute = createChatToolExecutor(deps());
+  const result = await execute({
+    id: 'c1',
+    name: 'get_knowledge',
+    arguments: JSON.stringify({ about: 'positioning' }),
+  });
+
+  const payload = JSON.parse(result.content) as Record<string, unknown>;
+  assert.deepEqual(payload.documents, []);
+  assert.deepEqual(payload.passages, []);
+
+  for (const key of ['documents_absence', 'passages_absence']) {
+    const absence = payload[key] as Record<string, unknown>;
+    assert.ok(absence, `${key} is stated rather than left as an empty list`);
+    assert.match(String(absence.what_would_produce_it), /npm run ingest:/);
+    // An absence reason states no digit: absent is an em-dash, never a zero.
+    assert.equal(/\d/.test(String(absence.reason)), false);
+  }
+
+  assert.deepEqual(result.sourced, []);
+});
+
+test('get_knowledge refuses a tag outside the taxonomy rather than widening the question', async () => {
+  reset();
+  const execute = createChatToolExecutor(deps({ retrieveCanon: canonWith(CANON_TEXT) }));
+
+  const refused = await execute({
+    id: 'c1',
+    name: 'get_knowledge',
+    arguments: JSON.stringify({ about: 'voice', tags: ['voice', 'pricing'] }),
+  });
+  const payload = JSON.parse(refused.content) as Record<string, unknown>;
+  assert.equal(payload.refusal, 'unknown_tags');
+  assert.ok(String(payload.reason).includes('pricing'), 'the refusal names the tag');
+  assert.ok((payload.taxonomy as string[]).includes('voice'), 'and hands back the closed list');
+  // Nothing was retrieved: a refused filter does not fall back to a wider one.
+  assert.equal(recorder.canonCalls, 0);
+  assert.deepEqual(refused.sourced, [], 'and a refusal declares nothing either');
+  assert.ok(refused.card, 'a refusal is a card the UI can render');
+
+  // The same discipline on the schema itself.
+  const invalid = await execute({
+    id: 'c2',
+    name: 'get_knowledge',
+    arguments: JSON.stringify({ about: 'x' }),
+  });
+  assert.equal(
+    (JSON.parse(invalid.content) as Record<string, unknown>).refusal,
+    'invalid_arguments',
+  );
+  assert.deepEqual(invalid.sourced, []);
+  assert.equal(recorder.canonCalls, 0);
+});
+
+test('a retrieval that fails is a stated failure, never a half answer', async () => {
+  reset();
+  withDeck();
+
+  const execute = createChatToolExecutor(
+    deps({
+      retrieveCanon: async () => {
+        recorder.canonCalls += 1;
+        throw new Error('embedding endpoint unreachable');
+      },
+    }),
+  );
+  const result = await execute({
+    id: 'c1',
+    name: 'get_knowledge',
+    arguments: JSON.stringify({ about: 'voice' }),
+  });
+
+  const payload = JSON.parse(result.content) as Record<string, unknown>;
+  assert.equal(payload.refusal, 'tool_failed');
+  assert.equal(payload.failed, 'passages');
+  // The documents it DID read are not shipped alongside the failure: "the decks
+  // say nothing about voice" and "the Canon could not be read" are different
+  // sentences, and a partial payload would hand the model the first one.
+  assert.equal(payload.documents, undefined);
+  assert.ok(result.card);
+});
+
+/* =============================================== 8c. the link contract =======
+ *
+ * A reply may send the operator somewhere; it may not invent where. The model
+ * names a surface, code writes the href, and these tests are the "code writes
+ * it" half: what `chatSurfaceLink` refuses, that every published link is a real
+ * screen, and that the REAL substitution engine is what puts one in a reply.
+ * ========================================================================== */
+
+test('a fabricated href is impossible — the builder refuses everything off the list', () => {
+  reset();
+
+  /* NOT A SURFACE. Another origin, a protocol, a traversal, a near-miss and the
+   * names every JavaScript object answers for free — the same set the tool-name
+   * allow-list is probed with, because it is the same class of mistake. */
+  for (const surface of [
+    'https://evil.example/board',
+    '//evil.example',
+    'http://localhost/board',
+    'javascript:alert(1)',
+    '/board/../settings',
+    '/../etc/passwd',
+    'board',
+    '/board/',
+    '/boardroom',
+    '/nope',
+    '',
+    '__proto__',
+    'constructor',
+    'toString',
+  ]) {
+    assert.equal(chatSurfaceLink(surface), null, `"${surface}" must not resolve to a link`);
+  }
+
+  /* A FOCUS THAT WOULD HAVE TO BE ESCAPED IS REFUSED, NOT ESCAPED. A percent
+   * escape is `%` plus two hex digits, and `%` is a UNIT MARKER to the Law's one
+   * tokeniser — an encoded id would assert a marked quantity, a marked quantity
+   * is a claim at any size, and the delivered link would come back with the
+   * strip chip in the middle of it. */
+  for (const focus of [
+    'a/b',
+    'a b',
+    'a%20b',
+    'a?b=c',
+    'a#b',
+    'https://evil.example',
+    '../settings',
+    '',
+    'x'.repeat(65),
+  ]) {
+    assert.equal(chatSurfaceLink('/board', focus), null, `focus "${focus}" must be refused`);
+  }
+
+  /* AND A FOCUS THAT WOULD PUT A QUANTITY IN THE ADDRESS IS REFUSED TOO. An
+   * Instagram id in a query string is a claim the lint context cannot source, so
+   * the reply would be delivered with a hole cut in the URL. Refusing here costs
+   * a link; allowing it costs a broken one. */
+  assert.equal(chatSurfaceLink('/board', '17851234567'), null);
+  assert.equal(chatSurfaceLink('/board', '340'), null);
+
+  // What DOES work: a surface, and a surface with an id that reads as a label.
+  assert.equal(chatSurfaceLink('/board'), '/board');
+  assert.equal(chatSurfaceLink('/brand'), '/brand');
+  assert.equal(chatSurfaceLink('/board', 'cluster1'), '/board?focus=cluster1');
+  assert.equal(chatSurfaceLink('/board', 'صوت_شخصي'), '/board?focus=صوت_شخصي');
+});
+
+test('every published link is a screen this app renders, and nav owns the list', () => {
+  reset();
+
+  // The allow-list is nav.ts's. tests/nav.test.ts reads src/app/(app) off disk
+  // and fails if a screen exists that nav does not classify, so a link built
+  // here resolves for the same reason the sidebar does.
+  assert.deepEqual(
+    CHAT_LINKS.map((link) => link.value),
+    SURFACES.map((surface) => surface.key),
+  );
+
+  for (const link of CHAT_LINKS) {
+    assert.ok(surfaceFor(link.value) !== null, `${link.value} is a live screen`);
+    assert.match(String(link.source_key), /^link\.[a-z_]+$/);
+    // A link is a place, never a measurement: it cannot enter the lint context
+    // and cannot put a receipt under a figure.
+    assert.equal(wholeQuantity(link.value), null);
+  }
+
+  // And a link value declared by a real tool result is dropped from the lint
+  // context by the REAL `lintEvidence`, not by an argument about it.
+  assert.equal(lintEvidence({ content: '{}', sourced: [...CHAT_LINKS] }), '');
+});
+
+test('a reply gets its link by naming a surface, and code writes the path', async () => {
+  reset();
+
+  /* The value map is built from a REAL tool result through the gate's own
+   * `toolValues`, so what resolves below is what would resolve in production. */
+  const execute = createChatToolExecutor(deps());
+  const result = await execute({
+    id: 'c1',
+    name: 'get_brand',
+    arguments: JSON.stringify({ section: 'facts' }),
+  });
+  const values = buildValueMap(toolValues(result));
+
+  const good = substitute('راجع الحساب على {{link.board}} وبعدين احكيلي.', values);
+  assert.equal(good.deliverable, true);
+  assert.ok(good.final.includes('/board'));
+  assert.equal(good.substitutions[0].key, 'link.board');
+  // The path came out of the map, at a position this engine recorded.
+  assert.equal(good.final.slice(good.substitutions[0].start, good.substitutions[0].end), '/board');
+
+  /* A KEY NAMING NO SCREEN LEAVES NO TRACE. Not the key, not the placeholder,
+   * not a nearest guess — a redaction marker, and a draft that is not
+   * deliverable. This is the whole of "a reply cannot fabricate a URL": there is
+   * no second path from a model's text to a studio address. */
+  const bad = substitute('افتح {{link.admin_panel}} حالاً.', values);
+  assert.equal(bad.deliverable, false);
+  assert.equal(bad.violations[0].kind, 'unknown-key');
+  assert.ok(bad.final.includes(REDACTED));
+  assert.equal(bad.final.includes('admin_panel'), false, 'the invented name is not echoed');
+});
+
+test('the link catalogue the model is taught is generated from the values it will get', () => {
+  reset();
+
+  /* One text, published onto every spec, built from `CHAT_LINKS`. A catalogue
+   * maintained by hand would teach a key the map does not hold, and every reply
+   * that used it would redact. */
+  for (const spec of chatToolSpecs()) {
+    assert.match(spec.description, /LINKING TO A SCREEN/, `${spec.name} publishes the contract`);
+    for (const link of CHAT_LINKS) {
+      assert.ok(
+        spec.description.includes(`{{${String(link.source_key)}}} → ${link.value}`),
+        `${spec.name} teaches ${String(link.source_key)} exactly as the map holds it`,
+      );
+    }
+  }
+
+  // A link the builder refuses is never published, so the catalogue cannot name
+  // a key the value map will not hold.
+  assert.deepEqual(chatLinkValues([{ surface: '/nope' }]), []);
+  assert.deepEqual(chatLinkValues([{ surface: '/board', focus: '17851234567' }]), []);
+  assert.deepEqual(chatLinkValues([{ surface: '/board', focus: 'cluster1' }]), [
+    { value: '/board?focus=cluster1', source_key: 'link.board.cluster1' },
+  ]);
 });
 
 /* ============================== 9. rule 18, proven against the import graph ==*/

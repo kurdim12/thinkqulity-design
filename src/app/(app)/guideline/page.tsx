@@ -173,7 +173,11 @@ export default function GuidelinePage() {
           type="warning"
           showIcon
           style={{ marginBlockEnd: 16 }}
-          message={tt('النسخة تحتاج مراجعة قبل الاعتماد', 'This version needs review before approval')}
+          message={tt('هذه النسخة تحتاج قراءة بشرية', 'This version needs a human read')}
+          description={tt(
+            'رصد القاضي فيها ما لا يستطيع الحسم فيه. اقرأ الأسطر ومصادرها أدناه، وإما أن تعتمدها كما هي أو تولّد نسخة أخرى.',
+            'The Judge flagged something it could not settle. Read the lines and their sources below, then either approve this version or generate another.',
+          )}
         />
       ) : null}
 
@@ -182,8 +186,16 @@ export default function GuidelinePage() {
 
       {!loading && !error && guidelines && guidelines.length === 0 ? (
         <EmptyState
-          description={tt('لم يُنشأ دليل بعد.', 'No guideline generated yet.')}
-          actionLabel={tt('أنشئ النسخة الأولى', 'Generate version 1')}
+          title={tt('لا دليل بعد', 'No guideline yet')}
+          description={tt(
+            'الدليل هو العلامة مكتوبةً بأسطر قابلة للاقتباس: النبرة، والمحاور، وما يُقال وما لا يُقال — وكل سطر يحمل مصدره من بيانات العلامة نفسها.',
+            'The guideline is the brand written down in quotable lines — the register, the pillars, what is said and what is not — and every line carries the source it came from.',
+          )}
+          hint={tt(
+            'تُبنى من عقل العلامة كما هو الآن. أمثلة صوت أكثر تعني نبرة أدقّ.',
+            'Built from the Brand Brain as it stands. More voice examples, sharper register.',
+          )}
+          actionLabel={tt('أنشئ النسخة الأولى', 'Write version 1')}
           onAction={handleGenerate}
         />
       ) : null}

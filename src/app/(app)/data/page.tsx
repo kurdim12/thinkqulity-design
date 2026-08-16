@@ -2103,8 +2103,8 @@ export default function DataPage() {
       <PageHeader
         title={t.nav.data}
         subtitle={tt(
-          'ارفع تصدير Apify، ثم شغّل التحديث ليعيد الوكيل بناء المحاور.',
-          'Upload an Apify export, then run Refresh so the agent rebuilds the pillars.',
+          'غرفة المحرّك: من أين تأتي كل الأرقام، وما كلفة كل عملية استخراج، وماذا عاد منها فعلاً.',
+          'The engine room: where every figure comes from, what each scrape costs, and what actually came back.',
         )}
         extra={refreshButton}
       />
@@ -2491,8 +2491,16 @@ export default function DataPage() {
 
       {snapshots.length === 0 ? (
         <EmptyState
-          description={tt('لا توجد لقطات بعد.', 'No snapshots yet.')}
-          actionLabel={tt('ارفع أول تصدير', 'Upload the first export')}
+          title={tt('لا لقطات بعد', 'No snapshots yet')}
+          description={tt(
+            'اللقطة هي حساب أحمد في لحظة واحدة: منشوراته وتفاعلها ووقت نشرها. كل شيء آخر في هذا المنتج يُحسب من هنا.',
+            'A snapshot is the account frozen at one moment — the posts, their engagement, when they went up. Everything else in this product is computed from these.',
+          )}
+          hint={tt(
+            'رفع تصدير Apify مجاني؛ الاستخراج الآلي هو ما يُحتسب.',
+            'Ingesting an Apify export costs nothing. The scrape actions are what get billed.',
+          )}
+          actionLabel={tt('ارفع أول تصدير', 'Ingest the first export')}
           onAction={scrollToDragger}
         />
       ) : (
@@ -2593,8 +2601,8 @@ export default function DataPage() {
               style={{ display: 'block', fontSize: 12, marginBlockEnd: 12 }}
             >
               {tt(
-                'آخر قياسين لكل حساب — هذا ما يعيده /api/profile. لا شيء بينهما مُستنتج.',
-                'The two most recent measurements per account — that is the window /api/profile returns. Nothing between them is interpolated.',
+                'آخر قياسين لكل حساب، ولا شيء بينهما مُستنتج — ما لم يُقَس لا يُرسم.',
+                'The two most recent measurements per account, with nothing interpolated between them — what was not measured is not drawn.',
               )}
             </Typography.Text>
 
@@ -2613,7 +2621,12 @@ export default function DataPage() {
       <Card title={tt('المحاور الحالية', 'Current pillars')}>
         {pillars.length === 0 ? (
           <EmptyState
-            description={tt('لم تُولَّد المحاور بعد.', 'Pillars have not been generated yet.')}
+            title={tt('لا محاور بعد', 'No pillars yet')}
+            description={tt(
+              'المحاور هي المواضيع التي يدور حولها المحتوى فعلاً، مقروءةً من المنشورات المخزّنة — وعليها تُبنى الأفكار والحملات.',
+              'The pillars are the themes the content actually revolves around, read back out of the stored posts. Concepts and campaigns are built on them.',
+            )}
+            hint={tt('يقرأ التحديث اللقطات ويعيد بناءها.', 'Refresh reads the snapshots and rebuilds them.')}
             actionLabel={tt('شغّل التحديث', 'Run Refresh')}
             onAction={handleRefresh}
           />

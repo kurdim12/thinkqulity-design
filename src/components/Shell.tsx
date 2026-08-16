@@ -5,30 +5,39 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { Layout, Menu, Segmented, Dropdown, Typography, Tooltip, App } from 'antd';
 import {
-  AppstoreOutlined,
   AuditOutlined,
   BulbOutlined,
-  CalendarOutlined,
   DatabaseOutlined,
-  DashboardOutlined,
-  FileTextOutlined,
   MessageOutlined,
-  RocketOutlined,
   SettingOutlined,
   UserOutlined,
   ThunderboltOutlined,
   TableOutlined,
-  TeamOutlined,
-  ReadOutlined,
-  SafetyCertificateOutlined,
-  SolutionOutlined,
 } from '@ant-design/icons';
 import { useLocale } from '@/lib/i18n/LocaleContext';
 import { useQuality } from '@/components/Providers';
 import { supabaseBrowser } from '@/lib/supabase/browser';
 import { GOLD } from '@/lib/theme';
+import { NAV, label, navKeyFor, titleFor, type NavKey } from '@/lib/nav';
 
 const { Sider, Header, Content } = Layout;
+
+/**
+ * One icon per surface, and the type says exactly five.
+ *
+ * `Record<NavKey, ...>` is what makes this safe to leave here while the nav
+ * itself lives in a .ts module the tests can read: adding a sixth entry to NAV
+ * without deciding what it looks like is a tsc error, and tsc runs before the
+ * build. The icons cannot live in nav.ts — JSX would put it out of reach of
+ * `node --test --experimental-strip-types`, which is the whole point of it.
+ */
+const NAV_ICON: Record<NavKey, React.ReactNode> = {
+  '/chat': <MessageOutlined />,
+  '/board': <TableOutlined />,
+  '/brand': <BulbOutlined />,
+  '/digest': <AuditOutlined />,
+  '/data': <DatabaseOutlined />,
+};
 
 export function Shell({ email, children }: { email: string; children: React.ReactNode }) {
   const { t, tt, locale, setLocale, isRTL } = useLocale();
@@ -38,35 +47,14 @@ export function Shell({ email, children }: { email: string; children: React.Reac
   const router = useRouter();
   const { message } = App.useApp();
 
-  const items = [
-    { key: '/dashboard', icon: <DashboardOutlined />, label: t.nav.dashboard },
-    // Directly under the dashboard: chat is the way into every other screen —
-    // it answers from the same data and dispatches to the same features — so it
-    // sits where a reader looks second, not at the bottom of the list.
-    // Labelled inline rather than from dict.ts, as /digest, /decisions and
-    // /audience already are: the dictionary is shared with other work in flight
-    // and this screen needs exactly one new string.
-    { key: '/chat', icon: <MessageOutlined />, label: tt('الدردشة', 'Chat') },
-    { key: '/brand', icon: <BulbOutlined />, label: t.nav.brand },
-    { key: '/data', icon: <DatabaseOutlined />, label: t.nav.data },
-    { key: '/concepts', icon: <AppstoreOutlined />, label: t.nav.concepts },
-    { key: '/campaigns', icon: <RocketOutlined />, label: t.nav.campaigns },
-    { key: '/calendar', icon: <CalendarOutlined />, label: t.nav.calendar },
-    { key: '/reports', icon: <FileTextOutlined />, label: t.nav.reports },
-    { key: '/digest', icon: <AuditOutlined />, label: tt('التقرير الأسبوعي', 'Weekly digest') },
-    // Directly under the digest: the ledger is what the digest is accountable
-    // to, and a decision nobody judged stays open and stays visible.
-    { key: '/decisions', icon: <SolutionOutlined />, label: tt('سجل القرارات', 'Decision ledger') },
-    { key: '/board', icon: <TableOutlined />, label: t.nav.board },
-    // Labelled inline rather than from dict.ts: the dictionary is shared with
-    // other work in flight, and this screen needs exactly one new string.
-    { key: '/audience', icon: <TeamOutlined />, label: tt('الجمهور', 'Audience') },
-    { key: '/guideline', icon: <ReadOutlined />, label: t.nav.guideline },
-    { key: '/compliance', icon: <SafetyCertificateOutlined />, label: t.nav.compliance },
-    { key: '/settings', icon: <SettingOutlined />, label: t.nav.settings },
-  ];
-
-  const selected = items.find((i) => pathname.startsWith(i.key))?.key ?? '/dashboard';
+  /**
+   * Null on a demoted screen, and the sidebar then highlights nothing. The
+   * title is resolved separately, from every route this app owns rather than
+   * from the five — so /concepts still names itself in the header even though
+   * no sidebar entry leads there.
+   */
+  const selected = navKeyFor(pathname);
+  const title = titleFor(pathname, locale);
 
   async function signOut() {
     try {
@@ -108,11 +96,11 @@ export function Shell({ email, children }: { email: string; children: React.Reac
         <Menu
           theme="dark"
           mode="inline"
-          selectedKeys={[selected]}
-          items={items.map((item) => ({
-            key: item.key,
-            icon: item.icon,
-            label: <Link href={item.key}>{item.label}</Link>,
+          selectedKeys={selected === null ? [] : [selected]}
+          items={NAV.map((surface) => ({
+            key: surface.key,
+            icon: NAV_ICON[surface.key],
+            label: <Link href={surface.key}>{label(surface, locale)}</Link>,
           }))}
         />
       </Sider>
@@ -128,8 +116,20 @@ export function Shell({ email, children }: { email: string; children: React.Reac
           }}
         >
           <Typography.Text strong style={{ fontSize: 15 }}>
-            {items.find((i) => i.key === selected)?.label}
+            {title}
           </Typography.Text>
+
+          {/* The whole of the product's self-defence, in two words, on every
+              screen at once — which is why six screens no longer carry a
+              paragraph of it each. The sentence is in the tooltip, and the
+              trigger includes focus because the tooltip IS the content here:
+              on hover alone a keyboard would land on the tag and be told
+              nothing. */}
+          <Tooltip title={t.header.readOnlyHint} trigger={['hover', 'focus']}>
+            <span className="tq-tag" tabIndex={0}>
+              {t.header.readOnly}
+            </span>
+          </Tooltip>
 
           <div className="tq-inline-end" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <Segmented
@@ -174,6 +174,10 @@ export function Shell({ email, children }: { email: string; children: React.Reac
               />
             </Tooltip>
 
+            {/* Settings leaves the sidebar for the user menu, which is where an
+                operator already looks for the account he is signed in as. It is
+                the only screen in here: a menu that collects every demoted
+                surface would be the same fifteen-entry list wearing a hat. */}
             <Dropdown
               placement={isRTL ? 'bottomLeft' : 'bottomRight'}
               menu={{
@@ -188,6 +192,11 @@ export function Shell({ email, children }: { email: string; children: React.Reac
                     ),
                   },
                   { type: 'divider' as const },
+                  {
+                    key: 'settings',
+                    icon: <SettingOutlined />,
+                    label: <Link href="/settings">{t.nav.settings}</Link>,
+                  },
                   { key: 'signout', label: t.header.signOut, onClick: () => void signOut() },
                 ],
               }}

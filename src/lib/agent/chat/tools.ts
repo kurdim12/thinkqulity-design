@@ -1,6 +1,6 @@
 /**
  * ===========================================================================
- * THE FIVE CHAT TOOLS
+ * THE SEVEN CHAT TOOLS
  * ===========================================================================
  *
  * `src/lib/agent/chat/run.ts` deliberately defines NO tools: it takes an array
@@ -8,9 +8,37 @@
  * growing a free-SQL escape hatch by accident. This file is that array and that
  * executor, and it is the entire surface the chat agent can reach.
  *
- * Five tools. get_stats · search_posts · get_brand · run_compliance ·
- * dispatch_feature. There is no sixth, and adding one means editing the tuple at
- * the foot of this file, which means a diff a reviewer sees.
+ * Seven tools. get_stats · search_posts · get_brand · run_compliance ·
+ * get_external_facts · get_knowledge · dispatch_feature. There is no eighth, and
+ * adding one means editing the tuple at the foot of this file, which means a
+ * diff a reviewer sees.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE SEVENTH EXISTS — «I ASK ABOUT THE BRAND, IT REPLIES WITH ANALYTICS»
+ * ---------------------------------------------------------------------------
+ * That was the operator's complaint, and the diagnosis is a missing tool rather
+ * than a missing instruction. This surface could see figures (`get_stats`),
+ * posts (`search_posts`), the Brand Brain's stored fields (`get_brand`) and
+ * claims read off the open web (`get_external_facts`). It could not see the
+ * INGESTED KNOWLEDGE — the decks, the Canon chunks, the References under refs/ —
+ * which is where positioning, voice and the argument for both actually live. A
+ * surface asked «حدثني عن البراند» with nothing but measurements in reach
+ * answers with measurements. It was behaving correctly and the answer was still
+ * the wrong kind of answer.
+ *
+ * `get_knowledge` is that reach, and it is deliberately NOT a second retriever:
+ * it calls `retrieveCanon` — the same function /api/canon inspects and the same
+ * one `run_compliance` already puts in front of the Judge — through the same
+ * injectable `deps.retrieveCanon` seam. One retriever, one ranking, one place a
+ * chunk's attribution comes from.
+ *
+ * WHAT IT RETURNS IS QUOTABLE AND IS NOT A MEASURE. Hard rule 21 was written for
+ * the open web, and the reason generalises to a deck without a word of it
+ * changing: A NUMBER INSIDE A DECK IS A CLAIM SOMEBODY WROTE, NOT A MEASUREMENT
+ * THIS SYSTEM MADE. So a knowledge result is sealed in exactly the envelope an
+ * external result is sealed in — `sealExternalResult`, `sourced: never[]`, no
+ * `source_keys` — and the seal is imported rather than re-implemented, because a
+ * second envelope that merely resembled the first is a second thing to weaken.
  *
  * ---------------------------------------------------------------------------
  * WHAT THIS FILE DOES NOT OWN
@@ -42,7 +70,7 @@
  * they are what made that surface provable rather than merely reviewable:
  *
  *   1. THE REGISTRY IS A CLOSED ALLOW-LIST, NOT A LOOKUP. `CHAT_TOOL_NAMES` is a
- *      five-member readonly tuple, `ChatToolName` is its element union, and
+ *      seven-member readonly tuple, `ChatToolName` is its element union, and
  *      `TOOLS` is `Record<ChatToolName, ChatTool>` — total (a name in the tuple
  *      with no entry is a compile error) and closed (a name outside it has no key
  *      to reach). Dispatch passes the model-supplied string through
@@ -107,6 +135,28 @@
  * than improvise around a silence — and because the tool result is also part of
  * the lint context (run.ts joins the blocks and every tool result before
  * linting), a cap message that names a number is a legitimate source for it.
+ *
+ * ---------------------------------------------------------------------------
+ * THE LINK CONTRACT — A REPLY CANNOT FABRICATE A URL
+ * ---------------------------------------------------------------------------
+ * A reply is allowed to send the operator somewhere: «افتح البورد». It is not
+ * allowed to invent where. So the model NAMES a surface and code WRITES the
+ * href, through the mechanism that already exists for exactly this shape of
+ * problem — the substitution engine. `chatLinkValues()` declares
+ * `{{link.<surface>}}` as a keyed value on every result this file returns, and
+ * `substitute()` writes the path. A key naming no surface resolves to nothing,
+ * redacts to `[?]` and fails the draft; a path the model types instead is text
+ * it typed, and this file never mints a value for it. There is no third way for
+ * a URL to reach the reply.
+ *
+ * THE ALLOW-LIST IS NAV'S, NOT A SECOND LIST. `SURFACES` in src/lib/nav.ts is
+ * the one place that says which routes render a screen — tests/nav.test.ts reads
+ * src/app/(app) off disk and fails if a screen exists that it does not classify
+ * — so a link built here resolves for the same reason the sidebar does. This
+ * file holds no route literal of its own.
+ *
+ * See `chatSurfaceLink` for the two rules that bound a focus id, and for why the
+ * id is NOT percent-encoded.
  */
 
 import { z } from 'zod';
@@ -116,9 +166,13 @@ import { MissingEnvError } from '@/lib/env';
 import type { Quality } from '@/lib/prefs';
 import { distinctPosts, scanCoverage, MAX_POSTS_SCAN } from '@/lib/audience/posts';
 import { agentContextEvidence, loadAgentContext, renderContextBlocks } from '@/lib/agent/context';
+import { keySegment } from '@/lib/agent/strategist/blocks';
 import { runLaw, type LawReport } from '@/lib/brain/law';
-import { retrieveCanon, type CanonHit } from '@/lib/brain/canon/retrieve';
+import { claimQuantities } from '@/lib/brain/law/claims-linter';
+import { isSourceKey } from '@/lib/brain/substitute';
+import { CANON_TAGS, retrieveCanon, type CanonHit } from '@/lib/brain/canon/retrieve';
 import { reconcile, runJudge, type JudgeVerdict } from '@/lib/brain/judge';
+import { SURFACES } from '@/lib/nav';
 import { CapUnavailableError } from '@/lib/mcp/tools';
 import { EXTERNAL_FACTS_KIND } from '@/lib/chat/transcript';
 import { sealExternalResult, type ExternalToolResult } from '@/lib/web/facts';
@@ -147,7 +201,7 @@ import type {
   SourcedValue,
   ToolParameterSchema,
 } from './run';
-import type { Account, BrandRow, Grounding, PostRow } from '@/lib/types/db';
+import type { Account, BrandRow, Grounding, KnowledgeDoc, PostRow } from '@/lib/types/db';
 
 /* ============================================================ dependencies ==*/
 
@@ -232,6 +286,161 @@ const defaultJudgeRunner: JudgeRunner = async (input) => {
   return { verdict: ruled.verdict, model: ruled.model };
 };
 
+/* ========================================================== the link contract */
+
+/**
+ * One place a reply may send the operator.
+ *
+ * `surface` is a route, and the only routes that exist are `SURFACES`. `focus`
+ * names an item ON that surface — a cluster, a document, a row — and it is
+ * optional because most links are «افتح البورد» and nothing more.
+ */
+export interface SurfaceLink {
+  surface: string;
+  focus?: string | null;
+}
+
+/**
+ * Every route this app renders a screen for, taken from the nav module and not
+ * restated. A route that stops existing stops being linkable in the same commit
+ * that removes it, because there is no second list here to forget.
+ */
+const LINK_SURFACES: readonly string[] = SURFACES.map((surface) => surface.key);
+
+/**
+ * WHAT A FOCUS ID MAY BE, AND WHY IT IS NOT ESCAPED.
+ *
+ * Letters (any script), numerals, `_` and `-`, up to 64 of them. That excludes
+ * every character an href would have to encode — `%`, `/`, `?`, `#`, `:`, the
+ * space — so an id needing an escape is REFUSED rather than mangled into one.
+ *
+ * The refusal is the point, and it is not squeamishness about encoders. A
+ * percent escape is `%` followed by two hex digits, and `%` is a UNIT MARKER to
+ * `quantities()` in src/lib/brain/law/claims-linter.ts — the one tokeniser both
+ * the Law and the substitution engine read text with. So `?focus=%D8%A7` asserts
+ * a MARKED quantity, a marked quantity is a claim at any size, and a claim the
+ * lint context cannot source is cut out of the delivered reply and replaced with
+ * the strip chip. An encoded link would arrive on the operator's screen with a
+ * hole in it. An id that cannot be spelled plainly is not linkable, and that is
+ * a smaller loss than a broken address.
+ */
+const FOCUS = /^[\p{L}\p{N}_-]{1,64}$/u;
+
+/**
+ * Whether an href can survive delivery: it asserts no quantity a reader would
+ * take as a measurement.
+ *
+ * `claimQuantities` is the LAW'S OWN function, not a second opinion about what a
+ * number is. A uuid or an Instagram id in a query string is exactly the kind of
+ * digit run the claims-linter flags and then strips, so a link carrying one is
+ * refused HERE — where the answer is "no link" — rather than delivered and cut
+ * apart downstream, where the answer would be a mutilated URL.
+ */
+function statesNoQuantity(href: string): boolean {
+  return claimQuantities(href).length === 0;
+}
+
+/**
+ * THE ONE PLACE AN IN-APP HREF IS BUILT. Null for anything else.
+ *
+ * A caller picks a surface from the closed list and, optionally, an id that
+ * matches `FOCUS`. It cannot supply a scheme, a host, a path segment or an
+ * escape, so there is no shape of argument that points this at another origin —
+ * the same structural refusal `search_posts` and `dispatch_feature` make.
+ *
+ * WHAT `focus` DOES AND DOES NOT DO TODAY, stated because a link that overclaims
+ * is a small lie on the operator's screen: it lands them on the surface, with
+ * the item named in the address. NO SCREEN READS IT YET. So a reply says «افتح
+ * البورد» and names the cluster in words; it does not say the Board will open
+ * scrolled to it. When a screen learns to read `focus`, it reads a value that
+ * has already passed this gate.
+ */
+export function chatSurfaceLink(surface: string, focus: string | null = null): string | null {
+  if (!LINK_SURFACES.includes(surface)) return null;
+  if (focus !== null && !FOCUS.test(focus)) return null;
+  const href = focus === null ? surface : `${surface}?focus=${focus}`;
+  return statesNoQuantity(href) ? href : null;
+}
+
+/**
+ * The links, as KEYED VALUES the substitution engine can write.
+ *
+ * `keySegment` and `isSourceKey` are both imported: the segment is minted by the
+ * one minter the strategist blocks use, and the finished key is checked against
+ * the ENGINE'S OWN grammar rather than against a pattern that resembles it. A
+ * key this rejects is dropped rather than offered, because a key the model is
+ * taught and the engine refuses would redact every reply that used it.
+ *
+ * A refused href contributes nothing. There is no fallback link and no nearest
+ * surface: a guess about where the operator wanted to go is the same class of
+ * mistake as a guess about a number.
+ */
+export function chatLinkValues(links: readonly SurfaceLink[]): SourcedValue[] {
+  const values: SourcedValue[] = [];
+  const claimed = new Set<string>();
+
+  for (const link of links) {
+    const focus = link.focus ?? null;
+    const href = chatSurfaceLink(link.surface, focus);
+    if (href === null) continue;
+
+    const surfaceSegment = keySegment(link.surface);
+    const focusSegment = focus === null ? '' : keySegment(focus);
+    if (surfaceSegment === '') continue;
+    if (focus !== null && focusSegment === '') continue;
+
+    const key = focusSegment === '' ? `link.${surfaceSegment}` : `link.${surfaceSegment}.${focusSegment}`;
+    if (!isSourceKey(key) || claimed.has(key)) continue;
+
+    claimed.add(key);
+    values.push({ value: href, source_key: key });
+  }
+
+  return values;
+}
+
+/**
+ * The surface links every result carries, built once.
+ *
+ * WHY ON EVERY RESULT rather than on the one tool an answer came from: the value
+ * map is assembled from the whole turn, so a link offered by `get_brand` is
+ * writable in a reply that also called `get_stats` — and a model that has to
+ * guess which tool "owns" a link writes the key that is not there. The cost is a
+ * dozen short strings per result, and they cost nothing downstream: `/board` is
+ * not a quantity, so `lintEvidence()` drops every one of them and the lint
+ * context is exactly what it was before.
+ *
+ * WHAT THIS CANNOT DO, stated rather than discovered: a turn that calls NO tool
+ * declares no values, so it can write no link. Fixing that means declaring the
+ * links beside the strategist blocks in src/lib/agent/chat/run.ts, which is a
+ * file this task does not own.
+ */
+export const CHAT_LINKS: readonly SourcedValue[] = chatLinkValues(
+  LINK_SURFACES.map((surface) => ({ surface })),
+);
+
+/**
+ * The link contract as the MODEL reads it, generated from `CHAT_LINKS` so the
+ * catalogue and the values cannot disagree.
+ *
+ * Published onto every tool spec by `chatToolSpecs()` rather than pasted into
+ * seven descriptions — one text, one place, no drift.
+ */
+function linkContractSection(): string {
+  const catalogue = CHAT_LINKS.flatMap((link) =>
+    link.source_key === undefined ? [] : [`  {{${link.source_key}}} → ${link.value}`],
+  ).join('\n');
+  return `
+
+LINKING TO A SCREEN — YOU DO NOT TYPE A URL
+Write the placeholder and code writes the path. These keys exist and no others:
+${catalogue}
+A path you type yourself is not a link this studio built, and a key naming no
+screen is replaced by a redaction marker and the reply is rejected. Say where you
+are sending the operator in words, then give the placeholder. Do not promise that
+a screen will open scrolled to a particular item — it opens the screen.`;
+}
+
 /* ================================================================ results ==*/
 
 /**
@@ -250,6 +459,14 @@ const defaultJudgeRunner: JudgeRunner = async (input) => {
  * stored artefact, a compliance verdict, a failure. A stat lookup gets no card:
  * its numbers belong in the sentence that cites them, and a card would invite the
  * reply to say "see above" while the figure sits unlinted next to it.
+ *
+ * THE SURFACE LINKS ARE APPENDED HERE, in the one constructor, so that "a reply
+ * may name a screen" is true of every answer including every refusal — a
+ * refusal is exactly the moment the operator needs somewhere to go. They are
+ * CONSTANTS this file computed from the nav module, so they widen nothing: a
+ * handler that declares no measurement still measures nothing, and `/board` is
+ * not a quantity, so `lintEvidence()` drops it and the lint context is
+ * unchanged.
  */
 function toolResult(
   payload: Record<string, unknown>,
@@ -261,7 +478,7 @@ function toolResult(
 ): ChatToolResult {
   return {
     content: JSON.stringify(payload, null, 2),
-    sourced: extra.sourced ?? [],
+    sourced: [...(extra.sourced ?? []), ...CHAT_LINKS],
     ...(extra.source_keys ? { source_keys: extra.source_keys } : {}),
     ...(extra.card ? { card: extra.card } : {}),
   };
@@ -1989,10 +2206,446 @@ const getExternalFactsTool: ChatTool = {
   run: runExternalFacts,
 };
 
+/* ===================================================== 7. get_knowledge =====
+ *
+ * ===========================================================================
+ * THE TOOL THE CHAT WAS MISSING
+ * ===========================================================================
+ * See the header for the diagnosis. Here is the measurement behind it, because
+ * "the chat cannot see the decks" is a claim about this codebase and should be
+ * checkable rather than asserted:
+ *
+ *   `renderStrategistBlocks()` is what the chat is given every turn, and the
+ *   only thing it emits about the workshop material is `brand.knowledge.<title>
+ *   = "<the source filename>"` (src/lib/agent/strategist/blocks.ts, `always(...
+ *   doc.source)`). THE FILENAME. Not a line of the content. The features get the
+ *   corpus in full through `renderContextBlocks()` in
+ *   src/lib/agent/context-view.ts; the chat never did. So the surface could name
+ *   the deck it could not read, which is the worst of both — it knows enough to
+ *   sound informed and has nothing to quote.
+ *
+ * ---------------------------------------------------------------------------
+ * TWO STORES, TWO TREATMENTS, AND ONLY ONE OF THEM IS RETRIEVED
+ * ---------------------------------------------------------------------------
+ * THE DECKS ARE READ, NOT SEARCHED. `brand.knowledge` holds whole documents that
+ * `npm run ingest:knowledge` extracted from Ahmad's own PDFs. That corpus is a
+ * few thousand tokens — context-view.ts makes exactly this argument and hands
+ * the features all of it, every time — so selecting WITHIN it would mean writing
+ * a ranking function to choose between three documents, which is the second
+ * retriever this tool is forbidden to build. They come back whole, bounded by a
+ * character cap that REPORTS itself rather than trimming in silence.
+ *
+ * THE CANON IS RETRIEVED, BY THE ONE RETRIEVER. `retrieveCanon` ranks the chunks
+ * — the one /api/canon inspects, the one `run_compliance` puts in front of the
+ * Judge, the one that degrades honestly to word overlap when no embedder is
+ * configured. It arrives through `deps.retrieveCanon`, the seam this file
+ * already had, so the tool can be executed in a repository with no key and so
+ * there is exactly one answer to "which passage informed this".
+ *
+ * IT DECLARES NOTHING, AND CANNOT BE WRITTEN TO. The result is built by
+ * `knowledgeResult()` on `sealExternalResult`, whose `sourced: never[]` admits
+ * only the empty array — the same seal src/lib/web/facts.ts wrote for the open
+ * web, imported rather than imitated. Rule 21's ARGUMENT, not merely its
+ * wording, is what carries it here:
+ *
+ *     A NUMBER INSIDE A DECK IS A CLAIM SOMEBODY WROTE.
+ *
+ * The deck says "engagement tripled" because a strategist typed it, possibly
+ * about another client, certainly at another time. It was not measured by this
+ * system, so there is no key that resolves it — and under rule 20 a quantity
+ * reaches the screen only as a substituted key. Compose the two and an ingested
+ * figure is structurally incapable of becoming a measure: it cannot be
+ * substituted (no key) and it cannot be typed (no digits allowed). The passage
+ * itself travels VERBATIM, digits and all, because a redacted quotation is not
+ * the quotation — the same residual `renderExternalFacts()` names and accepts.
+ *
+ * WHAT IT IS NOT. It is not `get_external_facts`: that reads claims retrieved
+ * from the open web and filed against a ledgered fetch. This reads what an
+ * operator deliberately INGESTED — Ahmad's own decks through
+ * `npm run ingest:knowledge`, and the guideline anatomy, principle notes and
+ * References under refs/ through `npm run ingest:canon`. Three sources, two
+ * stores, no overlap with the web: nothing here reads `external_facts` and
+ * nothing there reads a deck or a canon chunk.
+ * ========================================================================== */
+
+const KNOWLEDGE_ABOUT_MAX = 200;
+const KNOWLEDGE_K_MAX = 8;
+const KNOWLEDGE_K_DEFAULT = 5;
+
+/** Per document, and for the whole corpus. See `readDocuments` for the cut. */
+const DOCUMENT_CHARS_MAX = 6_000;
+const DOCUMENT_TOTAL_CHARS_MAX = 18_000;
+
+/** Marks a cut this code made. Holds no digit, so it can state no quantity. */
+const CUT_MARK = ' […]';
+
+export const getKnowledgeInput = z
+  .object({
+    about: z.string().trim().min(3).max(KNOWLEDGE_ABOUT_MAX),
+    tags: z.array(z.string().trim().min(1)).max(CANON_TAGS.length).optional(),
+    k: z.number().int().min(1).max(KNOWLEDGE_K_MAX).optional(),
+  })
+  .strict();
+
+const GET_KNOWLEDGE_DESCRIPTION = `Read what the studio has INGESTED — Ahmad's own decks, the guideline anatomy, the principle notes, the References — word for word, each piece with the document it came out of.
+
+This is where the brand's positioning, its voice and the argument behind both
+actually live. The figures live in get_stats; this is everything the figures are
+not. The blocks you were given name these documents by filename and carry not one
+line of their contents — this tool is the only way to read them.
+
+WHEN TO USE IT
+- FIRST, whenever the question is about what the brand IS rather than how it
+  performed: «حدثني عن البراند», the positioning, the tone, who it is for, what
+  a section of the guideline is supposed to contain. Answering that from
+  averages is answering a different question.
+- To quote a source rather than paraphrase it. Everything comes back with its
+  document title and, where the document had one, the address it came from — so
+  a claim about the brand can carry the line it rests on.
+- Before dispatching a deliverable, to check what the ingested material already
+  says about the thing you are about to have written.
+
+WHEN NOT TO USE IT
+- CRITICAL — NOTHING HERE IS A MEASUREMENT, AND A NUMBER INSIDE IT IS NOT ONE
+  EITHER. A deck saying engagement tripled is a sentence somebody typed,
+  possibly about another client, certainly at another time. You may say a named
+  document says it. You may NOT state it as a figure about these accounts, in
+  any script or spelling — there is no placeholder that resolves to it, so there
+  is no way to write one that survives the gate.
+- Do NOT treat an empty result as "the brand has no positioning". It means
+  nothing has been ingested. Say that, and say what would fix it.
+- Do NOT use it for claims read off the open web. That is get_external_facts,
+  which reads a different store with a different provenance.
+- Do NOT paste a passage into client-facing copy. Ingested material informs
+  STRUCTURE and PRINCIPLE and is quoted with attribution; another brand's words
+  must never leave here as this brand's words.
+
+PARAMETERS
+- about (string, required, 3–${KNOWLEDGE_ABOUT_MAX} characters). What you want to read about, in
+  ordinary words — "brand voice and tone", «الجمهور المستهدف». It ranks passages
+  ALREADY INGESTED and reaches nothing outside this database.
+- tags (array of strings, optional). Narrows the passages to those carrying at
+  least one of these, BEFORE ranking. The taxonomy is closed:
+  ${CANON_TAGS.join(', ')}. A tag outside it is refused by name rather than
+  ignored.
+- k (integer 1–${KNOWLEDGE_K_MAX}, optional, default ${KNOWLEDGE_K_DEFAULT}). How many passages to return.
+
+WHAT COMES BACK — TWO LISTS, AND THEY ARE NOT THE SAME KIND OF THING
+{ "documents": [{ "title", "source", "kind", "text", "truncated" }],
+  "passages": [{ "chunk_id", "document_title", "source_url", "document_kind",
+  "license_note", "tags", "text", "score", "method" }], ... }
+- "documents" is the client's OWN material, every document, whole. It is not
+  searched and not ranked — the corpus is small enough to read — so "about" does
+  not filter it and its absence from a result never means "no document mentions
+  this". A document longer than the cap comes back cut, with "truncated": true
+  saying so; a cut passage is not the whole passage and must not be quoted as
+  one.
+- "passages" is the Canon and the References, RANKED against "about". "method"
+  is "vector" when ranked by embedding and "lexical" when ranked by word overlap,
+  which is what happens with no embedder configured; a lexical hit is a weaker
+  match and says so.
+Both are VERBATIM. Nothing is summarised, translated or tidied on the way back.
+An empty side carries an "absence" naming what would create the material.
+
+REFUSAL SHAPES
+- "invalid_arguments" — the arguments did not match the schema above.
+- "unknown_tags" — a tag outside the closed taxonomy. The taxonomy comes back
+  with it; nothing was read.
+- "tool_failed" — the read failed. No passage is invented in its place.
+
+SIDE EFFECTS
+None you can spend. It reads rows, creates nothing, calls no generative model
+and is not capped. It may embed your "about" string with whichever embedder the
+deployment configures, in order to rank the passages; with none configured that
+falls back to word overlap rather than failing.`;
+
+/**
+ * THE ONE CONSTRUCTOR FOR A `get_knowledge` RESULT.
+ *
+ * The same shape and the same reasoning as `externalFactsResult()` above: it
+ * takes a payload and a card and there is no third parameter, so there is
+ * nothing an ingested passage could use to nominate a value for the lint context
+ * or the value map. The return type says it to the compiler and
+ * `sealExternalResult` says it again at runtime.
+ *
+ * IT CARRIES NO SURFACE LINKS EITHER, and that is the seal working rather than
+ * an omission: `sourced: never[]` admits the empty array and nothing else, so
+ * this result cannot offer a link value any more than it can offer a number.
+ * Weakening the envelope for a path would weaken it for a figure. A turn that
+ * wants both calls a second tool, which is one round trip and no exception.
+ */
+export function knowledgeResult(
+  payload: Record<string, unknown>,
+  card?: Record<string, unknown>,
+): ExternalToolResult {
+  return sealExternalResult({
+    content: JSON.stringify({ tool: 'get_knowledge', ...payload }, null, 2),
+    ...(card === undefined ? {} : { card }),
+  });
+}
+
+/** One ingested passage, as it is handed back: verbatim, with its attribution. */
+interface KnowledgePassage {
+  chunk_id: string;
+  document_title: string;
+  source_url: string | null;
+  document_kind: string;
+  license_note: string | null;
+  tags: string[];
+  /** VERBATIM. Never summarised, translated or trimmed on the way back. */
+  text: string;
+  score: number;
+  method: string;
+}
+
+function passageOf(hit: CanonHit): KnowledgePassage {
+  return {
+    chunk_id: hit.chunkId,
+    document_title: hit.documentTitle,
+    source_url: hit.sourceUrl,
+    document_kind: hit.kind,
+    license_note: hit.licenseNote,
+    tags: hit.tags,
+    text: hit.content,
+    score: Number(hit.score.toFixed(3)),
+    method: hit.method,
+  };
+}
+
+const KNOWLEDGE_CONTRACT =
+  'Everything here is quoted material, not a measurement. Quote it with its document title and, where it has one, its source. A number inside it is something somebody wrote; it is not a figure about these accounts and there is no key that resolves it.';
+
+/** One of Ahmad's own documents, as it is handed back. */
+interface KnowledgeDocumentView {
+  title: string;
+  /** The filename or URL it was ingested from — the string the blocks cite by. */
+  source: string;
+  kind: string;
+  /** VERBATIM, up to the cap. `truncated` says when that is not the whole of it. */
+  text: string;
+  truncated: boolean;
+}
+
+/**
+ * Cut at a whitespace boundary, never mid-token.
+ *
+ * The same rule `windowHistory` keeps in ./run.ts and for the same reason: a
+ * slice through `508` leaves `50`, a quantity that appears in no source. This
+ * text is read by a MODEL rather than delivered to a screen, and rule 20 already
+ * refuses a typed digit — but a mangled figure in front of a model is a mangled
+ * quotation waiting to be offered, and the boundary costs nothing.
+ */
+function cutToBoundary(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  const head = text.slice(0, limit);
+  const boundary = head.search(/\s\S*$/u);
+  return `${boundary > limit / 2 ? head.slice(0, boundary) : head}${CUT_MARK}`;
+}
+
+/**
+ * The client's own documents, whole, bounded, and honest about the bound.
+ *
+ * NOT FILTERED BY `about`, and the tool's description says so in terms. Choosing
+ * among three documents would be a ranking function, which is the second
+ * retriever this tool must not become; and the corpus is small enough that
+ * reading all of it is what context-view.ts already does for the features.
+ *
+ * The total cap stops adding documents rather than shrinking each one further:
+ * a corpus that outgrows the budget should tell the operator which documents it
+ * could not carry, not hand back a dozen fragments of equal uselessness.
+ */
+function readDocuments(docs: readonly KnowledgeDoc[]): {
+  documents: KnowledgeDocumentView[];
+  omitted: string[];
+} {
+  const documents: KnowledgeDocumentView[] = [];
+  const omitted: string[] = [];
+  let budget = DOCUMENT_TOTAL_CHARS_MAX;
+
+  for (const doc of docs) {
+    const whole = typeof doc.content === 'string' ? doc.content : '';
+    if (budget <= 0) {
+      omitted.push(doc.source);
+      continue;
+    }
+    const text = cutToBoundary(whole, Math.min(DOCUMENT_CHARS_MAX, budget));
+    budget -= text.length;
+    documents.push({
+      title: doc.title,
+      source: doc.source,
+      kind: doc.kind,
+      text,
+      truncated: text.length < whole.length,
+    });
+  }
+
+  return { documents, omitted };
+}
+
+const runKnowledge = async (args: unknown, deps: ChatToolDeps): Promise<ExternalToolResult> => {
+  const parsed = getKnowledgeInput.safeParse(args ?? {});
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map(
+      (issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`,
+    );
+    const reason = `The arguments for get_knowledge did not validate: ${issues.join('; ')}`;
+    return knowledgeResult(
+      { refusal: 'invalid_arguments', issues, reason },
+      failureCard('get_knowledge', 'invalid_arguments', issues.join('; ')),
+    );
+  }
+
+  const { about, k } = parsed.data;
+  const tags = parsed.data.tags ?? [];
+
+  /* A TAG OUTSIDE THE TAXONOMY IS REFUSED, NOT DROPPED. Silently ignoring it
+   * would answer a broader question than the one asked and call it the same
+   * answer — the shape of mistake `get_stats` refuses for a misspelt parameter
+   * and /api/chat refuses for a malformed `limit`. */
+  const unknownTags = tags.filter((tag) => !(CANON_TAGS as readonly string[]).includes(tag));
+  if (unknownTags.length > 0) {
+    const reason =
+      `No such tag: ${unknownTags.join(', ')}. The taxonomy is closed and nothing was retrieved.`;
+    return knowledgeResult(
+      {
+        refusal: 'unknown_tags',
+        requested_tags: tags,
+        taxonomy: [...CANON_TAGS],
+        reason,
+        note: 'A tag that does not exist is refused by name rather than ignored, because ignoring it would answer a wider question than the one you asked.',
+      },
+      failureCard('get_knowledge', 'unknown_tags', reason),
+    );
+  }
+
+  const retrieve = deps.retrieveCanon ?? defaultCanonRetriever;
+
+  /* THE TWO READS, AND WHY A FAILURE OF EITHER IS A FAILURE OF THIS TOOL.
+   *
+   * A half-answer here is worse than a refusal: "the decks say nothing about
+   * voice" and "the decks could not be read" are different sentences, and a
+   * result that carried the passages while silently dropping the documents would
+   * be handing the model the first one. So both reads are inside one try, and a
+   * failure names which side failed. */
+  let documents: KnowledgeDocumentView[] = [];
+  let omitted: string[] = [];
+  let hits: CanonHit[] = [];
+
+  try {
+    const res = await deps.db.from('brand').select('knowledge').eq('id', 1).maybeSingle();
+    if (res.error) throw new Error(`Could not read the Brand Brain: ${res.error.message}`);
+    const brand = (res.data as { knowledge: KnowledgeDoc[] | null } | null) ?? null;
+    const read = readDocuments(brand?.knowledge ?? []);
+    documents = read.documents;
+    omitted = read.omitted;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : 'The document read failed.';
+    return knowledgeResult(
+      {
+        refusal: 'tool_failed',
+        failed: 'documents',
+        reason,
+        note: 'The read failed. No document was written in its place, and the passages were not fetched either — half an answer would read as a whole one.',
+      },
+      failureCard('get_knowledge', 'tool_failed', reason),
+    );
+  }
+
+  try {
+    hits = await retrieve(about, {
+      ...(tags.length > 0 ? { tags } : {}),
+      k: k ?? KNOWLEDGE_K_DEFAULT,
+    });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : 'The retrieval failed.';
+    return knowledgeResult(
+      {
+        refusal: 'tool_failed',
+        failed: 'passages',
+        reason,
+        note: 'The retrieval failed. No passage was written in its place.',
+      },
+      failureCard('get_knowledge', 'tool_failed', reason),
+    );
+  }
+
+  const passages = hits.map(passageOf);
+
+  return knowledgeResult({
+    about,
+    tags,
+    documents,
+    passages,
+    ...(omitted.length > 0
+      ? {
+          documents_omitted: omitted,
+          documents_omitted_note:
+            'These documents exist and did not fit the budget for one answer, so you have NOT read them. Name them as material the studio holds and say you have not read them here; do not describe what they say. An operator reads them on the Brand screen.',
+        }
+      : {}),
+    ...(documents.length === 0
+      ? {
+          documents_absence: {
+            what: 'brand.knowledge',
+            reason:
+              "no workshop material has been loaded, so the studio holds none of the client's own documents.",
+            what_would_produce_it:
+              'An operator runs: npm run ingest:knowledge -- <the deck>. Until then say plainly that the material is not in the studio yet.',
+          },
+        }
+      : {}),
+    ...(passages.length === 0
+      ? {
+          passages_absence: {
+            what: 'canon.chunks',
+            reason:
+              'nothing ingested into the Canon matches this, so the studio has read nothing on it — which is not the same as there being nothing to read.',
+            what_would_produce_it:
+              'An operator ingests the note or the reference: npm run ingest:canon -- <path|url>.',
+          },
+        }
+      : {}),
+    contract: KNOWLEDGE_CONTRACT,
+  });
+};
+
+const getKnowledgeTool: ChatTool = {
+  name: 'get_knowledge',
+  title: 'Read ingested decks, Canon and References, verbatim',
+  description: GET_KNOWLEDGE_DESCRIPTION,
+  parameters: {
+    type: 'object',
+    properties: {
+      about: {
+        type: 'string',
+        maxLength: KNOWLEDGE_ABOUT_MAX,
+        description:
+          "What you want to read about, in ordinary words. It ranks passages already ingested and reaches nothing outside this database. It does NOT filter the client's own documents — those come back whole every time.",
+      },
+      tags: {
+        type: 'array',
+        items: { type: 'string', enum: [...CANON_TAGS] },
+        description:
+          'Narrow to passages carrying at least one of these. The taxonomy is closed; a tag outside it is refused by name.',
+      },
+      k: {
+        type: 'integer',
+        minimum: 1,
+        maximum: KNOWLEDGE_K_MAX,
+        default: KNOWLEDGE_K_DEFAULT,
+        description: 'How many passages to return.',
+      },
+    },
+    required: ['about'],
+    additionalProperties: false,
+  },
+  run: runKnowledge,
+};
+
 /* ================================================== the closed allow-list ====
  *
- * Five names, fixed at compile time. See the header for why this shape and not a
- * lookup table that anything can add to.
+ * Seven names, fixed at compile time. See the header for why this shape and not
+ * a lookup table that anything can add to.
  * ========================================================================== */
 
 export const CHAT_TOOL_NAMES = [
@@ -2001,13 +2654,14 @@ export const CHAT_TOOL_NAMES = [
   'get_brand',
   'run_compliance',
   'get_external_facts',
+  'get_knowledge',
   CHAT_DISPATCH_TOOL,
 ] as const;
 
 export type ChatToolName = (typeof CHAT_TOOL_NAMES)[number];
 
 /**
- * The four tools implemented here. `dispatch_feature` is deliberately absent:
+ * The six tools implemented here. `dispatch_feature` is deliberately absent:
  * it is ./dispatch.ts's, and routing it through this record would be the second
  * implementation this file exists to avoid.
  */
@@ -2017,6 +2671,7 @@ const TOOLS: Record<Exclude<ChatToolName, typeof CHAT_DISPATCH_TOOL>, ChatTool> 
   get_brand: getBrandTool,
   run_compliance: runComplianceTool,
   get_external_facts: getExternalFactsTool,
+  get_knowledge: getKnowledgeTool,
 };
 
 /**
@@ -2031,15 +2686,25 @@ export function isChatToolName(name: string): name is ChatToolName {
 /** Re-exported so a caller has ONE import for the whole surface. */
 export { CHAT_DISPATCHABLE, CHAT_DISPATCH_TOOL, isDispatchable };
 
-/** The tools as `runAgentChat` publishes them to the provider. No handlers. */
+/**
+ * The tools as `runAgentChat` publishes them to the provider. No handlers.
+ *
+ * THE LINK CONTRACT IS APPENDED HERE, to every spec including the dispatcher's,
+ * and that is why it is one text rather than seven. A model reads whichever
+ * description it happens to be looking at when it decides to send the operator
+ * somewhere, so the contract has to be under all of them; pasting it into each
+ * would be seven copies to fall out of step with `CHAT_LINKS`. It is generated
+ * from that constant, so the catalogue a model is taught and the values code
+ * will substitute are the same list read twice.
+ */
 export function chatToolSpecs(): ChatToolSpec[] {
+  const links = linkContractSection();
   return CHAT_TOOL_NAMES.map((name) => {
-    if (name === CHAT_DISPATCH_TOOL) return dispatchToolSpec();
-    const tool = TOOLS[name];
+    const spec = name === CHAT_DISPATCH_TOOL ? dispatchToolSpec() : TOOLS[name];
     return {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
+      name: spec.name,
+      description: `${spec.description}${links}`,
+      parameters: spec.parameters,
     };
   });
 }

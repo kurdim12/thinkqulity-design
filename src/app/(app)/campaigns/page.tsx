@@ -112,8 +112,8 @@ export default function CampaignsPage() {
       setGenerateOpen(false);
       generateForm.resetFields();
       notification.success({
-        message: tt('تم إنشاء الحملة', 'Campaign created'),
-        description: tt(`بواسطة النموذج ${res.model}`, `Generated with ${res.model}`),
+        message: tt('الخطة جاهزة', 'The plan is ready'),
+        description: tt('حُفظت مسودّة — راجعها ثم فعّلها.', 'Saved as a draft. Read it, then set it active.'),
       });
     } catch (err) {
       if (err && typeof err === 'object' && 'errorFields' in err) return; // form validation error
@@ -203,8 +203,8 @@ export default function CampaignsPage() {
       <PageHeader
         title={t.nav.campaigns}
         subtitle={tt(
-          'خطط حملات مبنية على المحاور والبيانات المتاحة.',
-          'Campaign plans built from the pillars and the data on hand.',
+          'هدف واحد ومدّة واحدة، وخطة تقول: لمن، وبأي وتيرة، وكيف نعرف أنها نجحت.',
+          'One objective, one window, and a plan that says who it is for, how often, and how you will know it worked.',
         )}
         extra={
           <Button type="primary" onClick={() => setGenerateOpen(true)}>
@@ -218,8 +218,16 @@ export default function CampaignsPage() {
 
       {!loading && !error && campaigns && campaigns.length === 0 ? (
         <EmptyState
-          description={tt('لا توجد حملات بعد.', 'No campaigns yet.')}
-          actionLabel={tt('أنشئ حملة', 'Create a campaign')}
+          title={tt('لا حملات بعد', 'No campaigns yet')}
+          description={tt(
+            'اكتب هدفاً ومدّة، ويعيدهما الوكيل خطةً: الشريحة، ومزيج المحاور، والوتيرة، وخطة قياس تقول ماذا تسحب ومتى.',
+            'Give it an objective and a window; it comes back as a plan — the segment, the pillar mix, the cadence, and a measurement plan naming what to pull and when.',
+          )}
+          hint={tt(
+            'تُبنى من محاورك وبياناتك المخزّنة، وتُحفظ مسودّة.',
+            'Built from your pillars and the data already stored, and saved as a draft.',
+          )}
+          actionLabel={tt('اكتب أول حملة', 'Plan the first campaign')}
           onAction={() => setGenerateOpen(true)}
         />
       ) : null}
@@ -342,8 +350,8 @@ export default function CampaignsPage() {
                   </div>
                   <p className="tq-muted" style={{ fontSize: 12, marginBlockStart: 12, marginBlockEnd: 0 }}>
                     {tt(
-                      'تُجمع الأرقام يدويًا — لا يتصل التطبيق بإنستغرام.',
-                      'Numbers are collected by hand — this app never connects to Instagram.',
+                      'اجمع هذه الأرقام بنفسك حين تنتهي المدة، ثم ارفع تصديراً في شاشة الداتا ليقيسها الوكيل معك.',
+                      'Collect these yourself when the window closes, then ingest an export on Data so the agent measures them with you.',
                     )}
                   </p>
                 </Card>
@@ -357,9 +365,7 @@ export default function CampaignsPage() {
                 </Row>
               </div>
             ) : (
-              <EmptyState
-                description={tt('اختر حملة لعرض التفاصيل.', 'Select a campaign to see its details.')}
-              />
+              <EmptyState description={tt('اختر حملة من القائمة.', 'Pick a campaign from the list.')} />
             )}
           </Col>
         </Row>

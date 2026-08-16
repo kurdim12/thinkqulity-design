@@ -936,10 +936,25 @@ if (mcp) {
 /* -- 1. the way in, in both languages ------------------------------------- */
 
 /**
- * The nav entry is rendered by `tt(arabic, english)`, so ONE of the two strings
- * going missing is invisible in whichever locale still has one. Both halves are
- * read out of the source and checked for the script they are supposed to be in
- * — a check that only asserted "two arguments" would pass on tt('Chat','Chat').
+ * The nav entry carries a label per locale, so ONE of the two strings going
+ * missing is invisible in whichever locale still has one. Both halves are read
+ * and checked for the script they are supposed to be in — a check that only
+ * asserted "two labels" would pass on { ar: 'Chat', en: 'Chat' }.
+ *
+ * READ FROM THE MODULE, NOT FROM THE SOURCE TEXT, and that is this check's
+ * second life. It used to regex `key: '/chat' … label: tt('…','…')` out of
+ * src/components/Shell.tsx. v6 moved the nav into src/lib/nav.ts so the cut
+ * from fifteen entries to five could be a tested fact instead of a rendering
+ * detail — and this check went on scanning Shell.tsx, where that pattern can no
+ * longer match anything. It reported "nothing navigates to /chat" while /chat
+ * sat first in the sidebar, and it would have reported exactly the same thing
+ * if the entry had genuinely been deleted. A check that returns the same answer
+ * either way has stopped being a check.
+ *
+ * Importing NAV fixes the class and not just the instance: it proves the array
+ * the sidebar actually renders, so the next time the nav changes shape this
+ * check either follows it or fails loudly, and can never again be quietly
+ * blind. nav.ts holds no JSX precisely so it can be loaded like this.
  */
 // Resolved from THIS file rather than from cwd: `npm run demo:check` happens to
 // run at the project root, but a check that silently reports "the menu is
@@ -948,40 +963,59 @@ if (mcp) {
 const REPO_ROOT = new URL('../', import.meta.url);
 const repoPath = (rel) => fileURLToPath(new URL(rel, REPO_ROOT));
 
-// Absolute for reading, repo-relative for the message: a fix line is something
-// a person retypes, so it names the file the way the repository does.
-const SHELL_REL = 'src/components/Shell.tsx';
+// Repo-relative for the message: a fix line is something a person retypes, so
+// it names the file the way the repository does.
+const NAV_REL = 'src/lib/nav.ts';
 const CHAT_PAGE_REL = 'src/app/(app)/chat/page.tsx';
-const SHELL_PATH = repoPath(SHELL_REL);
 const CHAT_PAGE_PATH = repoPath(CHAT_PAGE_REL);
 
+let navModule = null;
 try {
-  const shell = readFileSync(SHELL_PATH, 'utf8');
-  const entry = /key:\s*'\/chat'[^}]*?label:\s*tt\(\s*'([^']*)'\s*,\s*'([^']*)'\s*\)/.exec(shell);
+  navModule = await import('../src/lib/nav.ts');
+} catch (err) {
+  bad(
+    'Chat nav entry, both languages',
+    `${NAV_REL} could not be loaded, so the menu was not checked at all — ${err.message}. ` +
+      'This script relies on Node type-stripping; run it on the Node version in package.json',
+  );
+}
+
+if (navModule) {
+  const navEntries = navModule.NAV ?? [];
+  const entry = navEntries.find((surface) => surface.key === '/chat');
 
   if (!existsSync(CHAT_PAGE_PATH)) {
     bad(
       'Chat nav entry, both languages',
-      `${SHELL_REL} is not the problem — ${CHAT_PAGE_REL} does not exist, so the menu item would ` +
+      `${NAV_REL} is not the problem — ${CHAT_PAGE_REL} does not exist, so the menu item would ` +
         'route to a 404. Restore the page before linking to it',
     );
-  } else if (entry === null) {
+  } else if (entry === undefined) {
     bad(
       'Chat nav entry, both languages',
-      `no \`key: '/chat'\` item with a \`label: tt('<arabic>', '<english>')\` was found in ${SHELL_REL}. ` +
-        'The screen exists but nothing navigates to it, so a demo can only reach /chat by typing the ' +
-        'URL. Add the item to the `items` array next to the dashboard entry',
+      `no \`{ key: '/chat' }\` surface is in the NAV array exported by ${NAV_REL} — it holds ` +
+        `${navEntries.map((surface) => surface.key).join(', ') || 'nothing'}. The screen exists but ` +
+        'nothing navigates to it, so a demo can only reach /chat by typing the URL. Put it back in NAV',
     );
   } else {
-    const [, arabic, english] = entry;
+    const arabic = entry.ar ?? '';
+    const english = entry.en ?? '';
     // U+0600–U+06FF is the Arabic block; A-Za-z is the Latin one. A label in the
     // wrong script is a placeholder somebody meant to come back to.
-    const arabicOk = /[؀-ۿ]/.test(arabic);
-    const englishOk = /[A-Za-z]/.test(english) && !/[؀-ۿ]/.test(english);
+    //
+    // WRITTEN AS ESCAPES, and it was not always. Both ranges used to be typed
+    // as the literal characters, and U+0600 (ARABIC NUMBER SIGN) is a FORMAT
+    // character — an invisible byte sitting inside a regex in a file hard rule
+    // 7 binds, which nobody could see and no scan in this repository was
+    // pointed at. It was found by pointing one at it: the byte control in
+    // tests/strategist-probes.test.ts now scans every file this phase owns.
+    // The range is identical; only its spelling is now visible.
+    const arabicOk = /[\u0600-\u06FF]/.test(arabic);
+    const englishOk = /[A-Za-z]/.test(english) && !/[\u0600-\u06FF]/.test(english);
     if (!arabicOk || !englishOk) {
       bad(
         'Chat nav entry, both languages',
-        `the /chat item reads tt('${arabic}', '${english}') in ${SHELL_REL}, and ` +
+        `the /chat surface reads { ar: '${arabic}', en: '${english}' } in ${NAV_REL}, and ` +
           `${!arabicOk ? 'the Arabic label carries no Arabic script' : 'the English label is not Latin script'}` +
           ' — one locale would show a placeholder. Give it a real label in both',
       );
@@ -989,11 +1023,6 @@ try {
       ok('Chat nav entry, both languages', `/chat → AR "${arabic}" · EN "${english}"`);
     }
   }
-} catch (err) {
-  bad(
-    'Chat nav entry, both languages',
-    `${SHELL_REL} could not be read, so the menu was not checked at all — ${err.message}`,
-  );
 }
 
 /* -- 2. the question, answered from named lookups ------------------------- */
@@ -1333,6 +1362,215 @@ if (chatDispatchModule) {
       'Chat dispatch reservation permitted',
       `the reservation constraint could not be probed, so it is unknown whether a dispatch can reserve ` +
         `— ${err.message}`,
+    );
+  }
+}
+
+/* ======================================== migration drift, PROVEN BY RUNNING ==
+ *
+ * THE DEFECT CLASS THIS EXISTS FOR, and it is not hypothetical.
+ *
+ * 0005 wrote `mcp_reservations.tool` with a CHECK listing two names. Chat
+ * dispatch later reserved under a third, 'chat_dispatch'. Every dispatch raised
+ * 23514 inside mcp_reserve_units, the function rolled back, and the surface
+ * refused to produce anything at all — correct fail-closed behaviour and a
+ * completely dead product. Nothing noticed, because nothing EXECUTED the path.
+ * The code was right, the migration was right, and they had never been in the
+ * same room.
+ *
+ * The check above catches that specific case for the chat name by probing the
+ * constraint with an insert the foreign key is guaranteed to stop. This one is
+ * the general form of it, and it differs in three ways that matter:
+ *
+ *   1. EVERY NAME THE CODE USES, enumerated from the CODE — `RESERVING_TOOLS`
+ *      in src/lib/mcp/tools.ts and `CHAT_RESERVING_TOOL` in
+ *      src/lib/agent/chat/dispatch.ts, imported and read. A tool added there
+ *      appears here automatically; a list retyped in this file would be one
+ *      more thing to forget, which is the whole failure being guarded against.
+ *   2. THE WHOLE PATH, not the constraint. It calls `mcp_reserve_units` — the
+ *      function the app calls — so it proves the function EXISTS, that the
+ *      service role may EXECUTE it (0005 revokes it from anon and
+ *      authenticated), that the cap-day row is created, that the CHECK admits
+ *      the name, that the reservation row is written, and that
+ *      `mcp_settle_reservation` gives the units back. Reading the migration
+ *      file would have proven none of those; the migration file was never the
+ *      thing that was wrong.
+ *   3. IT ROLLS BACK, and then removes its own trace. Every reservation it
+ *      takes is released — which is the only settle status that returns units
+ *      — and both probe rows are deleted afterwards. If either deletion fails,
+ *      the residue is REPORTED rather than left for someone to find.
+ *
+ * IT NEVER TOUCHES THE REAL WINDOW. `RESERVE_PROBE_DAY` is a date no operator
+ * day will ever be, so a preflight can never consume the cap it is checking,
+ * and can never race a live run. It is deliberately NOT `IMPOSSIBLE_DAY` above:
+ * that probe depends on there being no mcp_cap_days row for its date, and this
+ * one CREATES one. Two probes, two sentinel days, no interference.
+ * ========================================================================== */
+
+const RESERVE_PROBE_DAY = '1900-01-02';
+const UNDEFINED_FUNCTION = '42883';
+const INSUFFICIENT_PRIVILEGE = '42501';
+const PROBE_NOTE = 'demo:check reservation probe — reserved and rolled back, no work was done';
+
+/** Every tool name the CODE reserves under. Read from the modules that reserve. */
+const reservingToolNames = () => {
+  const names = [];
+  for (const name of mcp?.RESERVING_TOOLS ?? []) names.push(name);
+  const chatName = chatDispatchModule?.CHAT_RESERVING_TOOL;
+  if (chatName) names.push(chatName);
+  return [...new Set(names)].sort();
+};
+
+/** One reserve refusal, translated into the one thing a person would do. */
+const describeReserveFailure = (tool, error) => {
+  if (error.code === CHECK_VIOLATION || /violates check constraint/i.test(error.message ?? '')) {
+    return (
+      `'${tool}' is REFUSED by mcp_reservations.tool, so every call that reserves under that name ` +
+      `fails closed and the feature behind it cannot produce anything at all. The code is not wrong ` +
+      `— the database has not been widened to know the name. Add a migration that replaces ` +
+      `mcp_reservations_tool_check with the same list plus '${tool}', exactly as ` +
+      `supabase/migrations/0007_chat_dispatch_reservation.sql did, and apply it`
+    );
+  }
+  if (error.code === UNDEFINED_FUNCTION) {
+    return (
+      `mcp_reserve_units does not exist, so NOTHING can reserve and every model-backed MCP or chat ` +
+      `call fails closed — apply supabase/migrations/0005_mcp_reservations.sql`
+    );
+  }
+  if (error.code === INSUFFICIENT_PRIVILEGE) {
+    return (
+      `the service role may not execute mcp_reserve_units (${error.message}). 0005 revokes it from ` +
+      `public, anon and authenticated and grants it to service_role — re-run the grant block at the ` +
+      `bottom of supabase/migrations/0005_mcp_reservations.sql`
+    );
+  }
+  return `reserving under '${tool}' failed with ${error.code ?? 'no code'} — ${error.message}`;
+};
+
+const RESERVATION_CHECK = 'Reservation path proven for every reserving tool';
+const toolNames = reservingToolNames();
+
+if (toolNames.length === 0) {
+  bad(
+    RESERVATION_CHECK,
+    'neither src/lib/mcp/tools.ts nor src/lib/agent/chat/dispatch.ts could be loaded, so the tool ' +
+      'names could not be read from the code and NOTHING about the reservation path was proven. ' +
+      'This script relies on Node type-stripping; run it on the Node version in package.json',
+  );
+} else {
+  const problems = [];
+  const proven = [];
+
+  try {
+    for (const tool of toolNames) {
+      // p_limit 1 with p_durable_used 0, then released before the next tool —
+      // so each name contends for the same single unit and every one of them
+      // has to be granted it on its own merits.
+      const reserved = await db.rpc('mcp_reserve_units', {
+        p_day: RESERVE_PROBE_DAY,
+        p_tool: tool,
+        p_units: 1,
+        p_limit: 1,
+        p_durable_used: 0,
+      });
+
+      if (reserved.error) {
+        problems.push(describeReserveFailure(tool, reserved.error));
+        continue;
+      }
+
+      const row = Array.isArray(reserved.data) ? reserved.data[0] : reserved.data;
+      if (!row || row.granted !== true || !row.reservation_id) {
+        problems.push(
+          `'${tool}' was refused by the limit rather than by the constraint (granted ` +
+            `${row?.granted ?? 'missing'}, ${row?.units_reserved_today ?? 'unknown'} unit(s) held on ` +
+            `${RESERVE_PROBE_DAY}). That window is a sentinel nothing else uses, so units sitting in ` +
+            `it are residue from an earlier probe that could not roll back: clear it with ` +
+            `delete from mcp_reservations where amman_day = '${RESERVE_PROBE_DAY}'; delete from ` +
+            `mcp_cap_days where amman_day = '${RESERVE_PROBE_DAY}';`,
+        );
+        continue;
+      }
+
+      const settled = await db.rpc('mcp_settle_reservation', {
+        p_reservation: row.reservation_id,
+        p_status: 'released',
+        p_note: PROBE_NOTE,
+      });
+
+      if (settled.error) {
+        problems.push(
+          `'${tool}' RESERVED but could not be released — ${settled.error.message}. A unit is now held ` +
+            `on ${RESERVE_PROBE_DAY} that this script could not give back`,
+        );
+        continue;
+      }
+
+      const back = Array.isArray(settled.data) ? settled.data[0] : settled.data;
+      if (back?.settled_status !== 'released' || back?.units_released !== 1) {
+        problems.push(
+          `'${tool}' reserved, but the rollback reported ${JSON.stringify(back)} where a released ` +
+            `reservation must report status "released" and one unit returned. Only "released" gives ` +
+            `units back, so a rollback that reports anything else has consumed the window`,
+        );
+        continue;
+      }
+
+      proven.push(tool);
+    }
+
+    // The window is back where it started, checked rather than assumed: a probe
+    // that quietly consumed the cap it was proving would be worse than none.
+    const held = await db
+      .from('mcp_cap_days')
+      .select('reserved_units')
+      .eq('amman_day', RESERVE_PROBE_DAY);
+    const remaining = held.data?.[0]?.reserved_units ?? 0;
+    if (remaining !== 0) {
+      problems.push(
+        `${remaining} unit(s) are still held on ${RESERVE_PROBE_DAY} after every rollback, so the ` +
+          `release path does not return what it takes — check mcp_settle_reservation against ` +
+          `supabase/migrations/0005_mcp_reservations.sql`,
+      );
+    }
+
+    // Scoped to the sentinel day and to nothing else. Both tables, reservations
+    // first: mcp_reservations.amman_day references mcp_cap_days.
+    const clearedRows = await db
+      .from('mcp_reservations')
+      .delete()
+      .eq('amman_day', RESERVE_PROBE_DAY);
+    const clearedDay = await db.from('mcp_cap_days').delete().eq('amman_day', RESERVE_PROBE_DAY);
+    const residue = [clearedRows.error?.message, clearedDay.error?.message].filter(Boolean).join('; ');
+    if (residue) {
+      problems.push(
+        `the probe rows on ${RESERVE_PROBE_DAY} could not be removed (${residue}), so the reservation ` +
+          `ledger now carries entries no operator made. Delete them by hand: delete from ` +
+          `mcp_reservations where amman_day = '${RESERVE_PROBE_DAY}'; delete from mcp_cap_days where ` +
+          `amman_day = '${RESERVE_PROBE_DAY}';`,
+      );
+    }
+  } catch (err) {
+    problems.push(
+      `the reservation path threw instead of answering — ${err.message}. Nothing about it was proven, ` +
+        `and rows may be left on ${RESERVE_PROBE_DAY}`,
+    );
+  }
+
+  if (problems.length > 0) {
+    bad(
+      RESERVATION_CHECK,
+      `${proven.length} of ${toolNames.length} name(s) proven (${
+        proven.length > 0 ? proven.map((t) => `'${t}'`).join(', ') : 'none'
+      }). ${problems.join(' — also: ')}`,
+    );
+  } else {
+    ok(
+      RESERVATION_CHECK,
+      `EXECUTED on ${RESERVE_PROBE_DAY}: reserved and rolled back one unit under each of ` +
+        `${toolNames.map((t) => `'${t}'`).join(', ')} — read from the code, not from the migration ` +
+        `file — every one granted, released, and the probe window left at zero with both rows removed`,
     );
   }
 }

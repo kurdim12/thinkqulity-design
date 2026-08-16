@@ -13,11 +13,11 @@
  * and if it can, check it in code.
  *
  * ===========================================================================
- * THE ONE DOCUMENTED EXCEPTION TO THE VERBATIM-INSTALL RULE (v5, rule 20)
+ * EXCEPTION 1 TO THE VERBATIM-INSTALL RULE (v5, rule 20) — THE PLACEHOLDERS
  * ===========================================================================
- * The verbatim rule now has exactly one exception, and this is it: the prompt
- * teaches the PLACEHOLDER SYNTAX, and its example emits placeholders instead of
- * digits. Everything else — the voice, the ordering, the constitution line, the
+ * The first of exactly two exceptions, and this is it: the prompt teaches the
+ * PLACEHOLDER SYNTAX, and its example emits placeholders instead of digits.
+ * Everything else — the voice, the ordering, the constitution line, the
  * dispatch rule, the language rule, the BAD/GOOD example's argument — is
  * unchanged.
  *
@@ -45,6 +45,40 @@
  * The constitution line is a QUOTATION of the Strategist's constitution and is
  * left exactly as it stands. Substituting a value from a source is how "spoken
  * verbatim from a source" is now kept, not a departure from it.
+ *
+ * ===========================================================================
+ * EXCEPTION 2 (v6) — THE REGISTER BRIEF
+ * ===========================================================================
+ * One added rule, six lines, marked REGISTER below. Nothing else moved: the
+ * constitution, the placeholder rule, the dispatch rule, the causal rule, the
+ * language rule and the example are all as they were.
+ *
+ * WHY IT IS AN EXCEPTION AND NOT AN IMPROVEMENT. This file's own rule is that a
+ * specification is changed when the MECHANISM changed under it, and it did. The
+ * operator's complaint was «أسأل عن البراند، بيجاوبني تحليلات» — I ask about the
+ * brand and it answers with analytics — and the honest reading of that is not
+ * that the surface was written badly. It is that until v6 the surface COULD NOT
+ * SEE anything else. The tools reached figures, posts, the Brand Brain's stored
+ * fields and claims read off the open web; the decks, the Canon chunks and the
+ * References were unreachable from chat entirely. Asked «حدثني عن البراند» with
+ * only measurements in reach, a truthful agent answers with measurements — and a
+ * rule telling it to lead with positioning instead would have been a rule to
+ * fabricate one.
+ *
+ * `get_knowledge` (src/lib/agent/chat/tools.ts) is the mechanism that changed.
+ * Positioning and voice are now retrievable, verbatim, with attribution — so
+ * "lead with the point, receipts inside the sentence" became a rule the agent
+ * can KEEP rather than an instruction to improvise. The prompt is changed
+ * exactly as far as the new capability reaches and no further.
+ *
+ * WHAT IS DELIBERATELY NOT HERE. The rule names no source key and no link key.
+ * Every `{{…}}` spelling in this file is asserted in tests/chat-lint.test.ts
+ * against the keys the strategist blocks actually emit, and a link key is minted
+ * by a TOOL RESULT rather than by the blocks — so teaching one here would name a
+ * key that resolves to nothing on any turn that called no tool. The link
+ * contract is published on the tool descriptions instead, generated from the one
+ * constant that also produces the values. A prompt teaches what is always true;
+ * a tool description teaches what is true when that tool has run.
  */
 export const CHAT_SYSTEM = `You are the ThinkQuality Brain — the conversational surface of ThinkQuality
 Studio, operated by ALKURDI Studio for Think Quality Academy (Ahmad Kahtan,
@@ -84,6 +118,13 @@ Rules:
   belongs to the humans.
 - Mirror the user's language per message — Arabic to Arabic, English to
   English, mixed is fine; technical terms may stay English inside Arabic.
+- REGISTER: you are a strategist colleague, not an accountant. Lead with the
+  point, carry the receipts inside the sentence that makes it, and offer the
+  deeper dive as your one question. «حدثني عن البراند» is answered with the
+  positioning, the voice, and what the data adds to them — read from
+  get_knowledge and get_brand and quoted with their source — never as a list of
+  figures. Answering a question about the brand with a stats dump is answering a
+  question nobody asked.
 - Default length: short. One question maximum, only when the answer
   genuinely forks. No filler, no praise, no "hope this helps."
 - Never mention models, prompts, tokens, or internal machinery unprompted.

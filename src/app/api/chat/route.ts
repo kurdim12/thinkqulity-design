@@ -191,6 +191,18 @@ export async function POST(request: Request) {
      * with a structured refusal plus a card — so neither is re-implemented here.
      * It never throws; every failure comes back as a shaped tool result.
      *
+     * WHAT v6 ADDED, AND WHY NEITHER NEEDED A LINE HERE. `get_knowledge` — the
+     * decks, the Canon chunks and the References, verbatim with attribution — is
+     * a seventh member of that same tuple, so it arrives through
+     * `chatToolSpecs()` and is executed by the same executor; this route did not
+     * have to learn its name. And the LINK CONTRACT, which lets a reply send the
+     * operator to a screen without inventing a URL, is carried on the tool
+     * results as ordinary keyed values and written into the reply by the
+     * substitution engine inside `runAgentChat`. So a link is already linted,
+     * already substituted and already persisted by the same three steps below
+     * that a figure is. A route that had to special-case either one would be a
+     * route that could get either one wrong.
+     *
      * `now` is fixed ONCE for the whole turn so the cap window cannot shift
      * between the read and the reservation.
      * -------------------------------------------------------------------- */

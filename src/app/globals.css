@@ -1,8 +1,94 @@
+/* ===========================================================================
+   ThinkQuality Studio — the design system.
+
+   Read src/lib/theme.ts first: it holds the same colour tokens as a TypeScript
+   record, and tests/receipt-chip.test.ts asserts that this file and that record
+   agree key for key and character for character. The markers below are load
+   bearing — the test parses between them, and it also refuses any hex or rgb()
+   literal anywhere else in this file. That is the whole mechanism by which a
+   colour cannot be defined twice.
+   ======================================================================== */
+
+/* tq-colour-tokens:start */
 :root {
-  --tq-charcoal: #1c1b19;
-  --tq-gold: #c9a227;
-  --tq-paper: #f6f4f0;
-  --tq-line: rgba(28, 27, 25, 0.1);
+  --tq-paper: #F7F5F1;
+  --tq-surface: #FFFDFA;
+  --tq-ink: #17150F;
+  --tq-line: #E7E2D9;
+  --tq-muted: #8A8378;
+
+  --tq-brand: #48C0C0;
+  --tq-brand-light: #78D8D8;
+  --tq-brand-ink: #1F6E6E;
+
+  --tq-data: #2E6B4F;
+  --tq-data-tint: #EDF2ED;
+  --tq-data-line: #CBDCCF;
+  --tq-hypothesis: #8A5F0B;
+  --tq-hypothesis-tint: #F6EFE0;
+  --tq-hypothesis-line: #E6D5AF;
+  --tq-failure: #9B2C1F;
+  --tq-failure-tint: #F7EAE7;
+  --tq-failure-line: #E6C6BF;
+
+  --tq-ink-06: rgba(23, 21, 15, 0.06);
+  --tq-ink-55: rgba(23, 21, 15, 0.55);
+  --tq-lift: rgba(23, 21, 15, 0.02);
+  --tq-paper-10: rgba(247, 245, 241, 0.10);
+  --tq-paper-62: rgba(247, 245, 241, 0.62);
+}
+/* tq-colour-tokens:end */
+
+/* ---------------------------------------------------------------------------
+   v5 names, kept alive only so surfaces outside this change set still render.
+   There is no gold in v6: an accent rule is a hairline now. Each remaining use
+   is listed in the handover and should move to a token above or to nothing.
+   -------------------------------------------------------------------------- */
+:root {
+  --tq-charcoal: var(--tq-ink);
+  --tq-gold: var(--tq-muted);
+}
+
+/* ---------------------------------------------------------------------------
+   Everything that is not a colour: type, rhythm, motion.
+
+   Arabic display is Reem Kufi and it is for TITLES ONLY — digest headlines,
+   guideline heads, hero stat labels. It is a restraint, never a body face.
+   `--font-display` is published by next/font in src/app/layout.tsx, the same
+   self-hosting mechanism the Arabic body face already uses; if it is not
+   declared, the chain below falls back to the body face and the interface is
+   merely plainer, never broken.
+   -------------------------------------------------------------------------- */
+:root {
+  --tq-font-display: var(--font-display, var(--font-arabic, 'Segoe UI')), 'Segoe UI', Tahoma,
+    sans-serif;
+  --tq-font-ar: var(--font-arabic, 'Segoe UI'), 'Segoe UI', Tahoma, sans-serif;
+
+  --tq-fs-1: 13px;
+  --tq-fs-2: 15px;
+  --tq-fs-3: 18px;
+  --tq-fs-4: 24px;
+  --tq-fs-5: 34px;
+  --tq-fs-6: 48px;
+
+  --tq-s-1: 8px;
+  --tq-s-2: 16px;
+  --tq-s-3: 24px;
+  --tq-s-4: 40px;
+  --tq-s-5: 64px;
+
+  --tq-radius: 10px;
+  --tq-radius-sm: 6px;
+
+  --tq-hairline: 1px solid var(--tq-line);
+  --tq-shadow: 0 1px 0 var(--tq-line);
+  --tq-shadow-lift: 0 2px 10px var(--tq-lift);
+
+  --tq-dur-fast: 140ms;
+  --tq-dur: 240ms;
+  --tq-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  /* The one flourish in the product. Used by the receipt chip and nothing else. */
+  --tq-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 * {
@@ -18,70 +104,331 @@ body {
 
 body {
   background: var(--tq-paper);
-  color: var(--tq-charcoal);
+  color: var(--tq-ink);
   -webkit-font-smoothing: antialiased;
 }
+
+/* ------------------------------------------------------------------- type -- */
 
 /* Arabic content — user-generated or agent-generated — always declares its own
    direction so a mixed EN/AR string never renders scrambled. */
 .tq-ar {
-  font-family: var(--font-arabic), 'Segoe UI', Tahoma, sans-serif;
+  font-family: var(--tq-font-ar);
   line-height: 1.9;
+}
+
+/* Reem Kufi, titles only. Never inherited by anything with a paragraph in it. */
+.tq-display {
+  font-family: var(--tq-font-display);
+  font-weight: 500;
+  line-height: 1.45;
+  letter-spacing: 0;
+  margin: 0;
 }
 
 /* Metrics stay Latin-digit and LTR even inside an RTL page. */
 .tq-num {
   direction: ltr;
   unicode-bidi: isolate;
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: 'tnum' 1, 'lnum' 1;
 }
 
-/* Directional icons mirror with the document; symbols like ✓ must not. */
+/* Directional icons mirror with the document; symbols like a tick must not. */
 [dir='rtl'] .tq-mirror {
   transform: scaleX(-1);
 }
 
+.tq-muted {
+  color: var(--tq-muted);
+}
+
+.tq-hook {
+  font-size: var(--tq-fs-3);
+  font-weight: 600;
+  line-height: 1.8;
+  margin: 0 0 var(--tq-s-1);
+}
+
+/* Content that must reach a screen reader without reaching the eye. The popover
+   copy on a receipt chip is duplicated here, so the receipt is legible to a
+   reader who never opens it. */
+.tq-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ----------------------------------------------------------------- layout -- */
+
 .tq-page {
-  padding: 24px;
+  padding-block: var(--tq-s-4);
+  padding-inline: var(--tq-s-3);
   max-width: 1240px;
   margin-inline: auto;
 }
 
 .tq-page-header {
-  margin-block-end: 20px;
+  margin-block-end: var(--tq-s-3);
 }
 
 .tq-page-header h1 {
-  margin: 0 0 4px;
-  font-size: 22px;
+  margin: 0 0 6px;
+  font-size: var(--tq-fs-4);
   font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .tq-page-header p {
   margin: 0;
-  color: rgba(28, 27, 25, 0.6);
-  font-size: 13px;
+  color: var(--tq-muted);
+  font-size: var(--tq-fs-1);
+  max-width: 62ch;
 }
 
 /* Logical spacing helpers — never ml/mr, so RTL needs no overrides. */
 .tq-stack > * + * {
-  margin-block-start: 16px;
+  margin-block-start: var(--tq-s-2);
 }
 
 .tq-inline-end {
   margin-inline-start: auto;
 }
 
-.tq-muted {
-  color: rgba(28, 27, 25, 0.55);
+.tq-rule {
+  border: 0;
+  border-block-start: var(--tq-hairline);
+  margin-block: var(--tq-s-3);
 }
 
-.tq-hook {
-  font-size: 17px;
-  font-weight: 600;
-  line-height: 1.8;
-  margin: 0 0 8px;
+/* ------------------------------------------------------------------ tags -- */
+
+/* One tag, three grounding-bearing variants and three neutral ones. Colour is
+   spent on grounding and on nothing else, so format and status separate by
+   weight and by border instead of by hue. Doubled class for specificity: antd
+   injects its own sheet at runtime, after this file. */
+.tq-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border-radius: var(--tq-radius-sm);
+  border: 1px solid var(--tq-line);
+  background: transparent;
+  color: var(--tq-muted);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: nowrap;
 }
+
+.tq-tag.tq-tag--data {
+  color: var(--tq-data);
+  border-color: var(--tq-data-line);
+  background: var(--tq-data-tint);
+}
+
+.tq-tag.tq-tag--hypothesis {
+  color: var(--tq-hypothesis);
+  border-color: var(--tq-hypothesis-line);
+  background: var(--tq-hypothesis-tint);
+}
+
+.tq-tag.tq-tag--failure {
+  color: var(--tq-failure);
+  border-color: var(--tq-failure-line);
+  background: var(--tq-failure-tint);
+}
+
+/* Neutral weights: quiet, stated, done. */
+.tq-tag.tq-tag--quiet {
+  color: var(--tq-muted);
+  border-style: dashed;
+}
+
+.tq-tag.tq-tag--stated {
+  color: var(--tq-ink);
+  border-color: var(--tq-ink);
+}
+
+.tq-tag.tq-tag--done {
+  color: var(--tq-paper);
+  border-color: var(--tq-ink);
+  background: var(--tq-ink);
+}
+
+/* A human said no. Crossed out, not alarmed — red is reserved for failure. */
+.tq-tag.tq-tag--struck {
+  text-decoration: line-through;
+}
+
+/* --------------------------------------------------------- receipt chip -- */
+
+/* The signature element. A dotted underline under a figure is a promise that
+   the number has a home; the promise is only ever made when a source key
+   exists (see resolveReceipt in src/lib/theme.ts). */
+.tq-receipt {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.tq-receipt-figure {
+  display: inline-block;
+  border-block-end: 1px dotted var(--tq-muted);
+  padding-block-end: 1px;
+  transition:
+    border-color var(--tq-dur-fast) var(--tq-ease),
+    color var(--tq-dur-fast) var(--tq-ease);
+}
+
+.tq-receipt:hover .tq-receipt-figure,
+.tq-receipt:focus-visible .tq-receipt-figure {
+  border-block-end-color: var(--tq-ink);
+  color: var(--tq-ink);
+}
+
+.tq-receipt:focus-visible {
+  outline: 2px solid var(--tq-ink);
+  outline-offset: 3px;
+}
+
+.tq-receipt[aria-expanded='true'] .tq-receipt-figure {
+  border-block-end-style: solid;
+  border-block-end-color: var(--tq-ink);
+  animation: tq-receipt-open 360ms var(--tq-spring) both;
+}
+
+@keyframes tq-receipt-open {
+  0% {
+    transform: none;
+  }
+  45% {
+    transform: translateY(-1px) scale(1.05);
+  }
+  100% {
+    transform: none;
+  }
+}
+
+/* An absence is muted and unclickable. It is not a chip and must not look like
+   one — no underline, nothing to press. */
+.tq-receipt-absent {
+  color: var(--tq-muted);
+}
+
+.tq-receipt-popover .tq-receipt-body {
+  max-width: 300px;
+  font-size: var(--tq-fs-1);
+  line-height: 1.75;
+}
+
+.tq-receipt-label {
+  color: var(--tq-ink);
+  margin-block-end: 6px;
+}
+
+.tq-receipt-row {
+  display: flex;
+  gap: var(--tq-s-1);
+  align-items: baseline;
+  color: var(--tq-muted);
+}
+
+.tq-receipt-row dt {
+  flex: none;
+  min-width: 84px;
+}
+
+.tq-receipt-row dd {
+  margin: 0;
+  color: var(--tq-ink);
+  word-break: break-word;
+}
+
+.tq-receipt-key {
+  font-family: ui-monospace, 'Cascadia Mono', 'Segoe UI Mono', monospace;
+  font-size: 12px;
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+.tq-receipt-link {
+  display: inline-block;
+  margin-block-start: var(--tq-s-1);
+  padding-block-start: var(--tq-s-1);
+  border-block-start: var(--tq-hairline);
+  width: 100%;
+  font-size: var(--tq-fs-1);
+}
+
+/* ---------------------------------------------------- motion + skeletons -- */
+
+/* ONE orchestrated moment per surface: the content arrives, then nothing moves
+   again. Index staggers siblings; nothing here loops. */
+.tq-reveal {
+  animation: tq-reveal var(--tq-dur) var(--tq-ease) both;
+  animation-delay: calc(var(--tq-reveal-index, 0) * 55ms);
+}
+
+@keyframes tq-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Flat, never a sweeping gradient: a skeleton is a placeholder, not an effect. */
+.tq-skeleton {
+  display: block;
+  background: var(--tq-line);
+  border-radius: var(--tq-radius-sm);
+  animation: tq-pulse 1.5s var(--tq-ease) infinite;
+}
+
+@keyframes tq-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.tq-skeleton-card {
+  border: var(--tq-hairline);
+  border-radius: var(--tq-radius);
+  background: var(--tq-surface);
+  padding: var(--tq-s-3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tq-reveal,
+  .tq-skeleton,
+  .tq-receipt-figure,
+  .tq-receipt[aria-expanded='true'] .tq-receipt-figure {
+    animation: none;
+    transition: none;
+  }
+}
+
+/* -------------------------------------------------------------- markdown -- */
 
 .tq-markdown {
   line-height: 1.95;
@@ -95,15 +442,15 @@ body {
 }
 
 .tq-markdown h1 {
-  font-size: 1.4rem;
+  font-size: var(--tq-fs-4);
 }
 
 .tq-markdown h2 {
-  font-size: 1.2rem;
+  font-size: var(--tq-fs-3);
 }
 
 .tq-markdown h3 {
-  font-size: 1.05rem;
+  font-size: var(--tq-fs-2);
 }
 
 .tq-markdown ul,
@@ -120,22 +467,24 @@ body {
 
 .tq-markdown th,
 .tq-markdown td {
-  border: 1px solid var(--tq-line);
-  padding: 8px 10px;
+  border: var(--tq-hairline);
+  padding: var(--tq-s-1) 10px;
   text-align: start;
 }
 
 .tq-markdown blockquote {
   margin-inline: 0;
   padding-inline-start: 14px;
-  border-inline-start: 3px solid var(--tq-gold);
-  color: rgba(28, 27, 25, 0.7);
+  border-inline-start: 2px solid var(--tq-line);
+  color: var(--tq-ink-55);
 }
+
+/* ----------------------------------------------------------------- login -- */
 
 .tq-login {
   min-height: 100vh;
   display: grid;
   place-items: center;
-  padding: 24px;
-  background: linear-gradient(160deg, #f6f4f0 0%, #eceae4 100%);
+  padding: var(--tq-s-3);
+  background: var(--tq-paper);
 }

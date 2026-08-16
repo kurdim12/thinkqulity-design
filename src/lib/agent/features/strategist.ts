@@ -10,10 +10,14 @@ import {
   BLOCK_TAGS,
   DEFAULT_ACTION_BUDGET,
   DEFAULT_PERIOD_DAYS,
+  assessCoverage,
   collectSourceKeys,
   loadStrategistData,
   renderStrategistBlocks,
   strategistEvidence,
+  type CorpusGap,
+  type StrategistCorpus,
+  type StrategistCoverage,
   type StrategistData,
 } from '@/lib/agent/strategist/blocks';
 import {
@@ -82,6 +86,20 @@ import type { BrainReport, FeatureRunOutcome, RunnableFeature } from './types';
  *   a single action it was handed. See the note above persistStrategist().
  * - NO SENDING. `digests.sent` is written `false` and is never written again by
  *   this app. A human sends the digest, outside it.
+ *
+ * ===========================================================================
+ * THE ONE PATH WHERE CODE WRITES THE ARABIC
+ * ===========================================================================
+ * `composeInsufficientPayload()` builds a whole payload — headline, client
+ * line, escalation, actions — without calling a model, and every string in it
+ * is a constant in this file. That is a genuine exception to how everything
+ * else here works and it is deliberate in both directions: the run has exactly
+ * one thing to say, saying it differently each week would be the padding this
+ * product refuses, and a model asked to report that it cannot see is a model
+ * with an incentive. It is also free, which hard rule 9 asks for before it asks
+ * for anything else. What guards it is that the strings carry NO digits and
+ * every figure the payload states arrives as a `basis` copied verbatim out of
+ * the blocks — asserted, against the real Law, in tests/strategist-probes.test.ts.
  */
 
 /* ================================================================ clock === */
@@ -424,6 +442,54 @@ export type StrategistResponse = z.infer<typeof strategistResponseSchema>;
 const RESPONSE_IS_A_PAYLOAD: (response: StrategistResponse) => StrategistPayload = (response) =>
   response;
 void RESPONSE_IS_A_PAYLOAD;
+
+/**
+ * ===========================================================================
+ * WHAT IS STORED — THE RESPONSE PLUS THE ONE FIELD THE MODEL MAY NOT WRITE
+ * ===========================================================================
+ * `coverage` is NOT in `strategistResponseSchema`, and that is the point of it.
+ * Whether the run could see anything is a fact about the DATABASE, computed by
+ * `assessCoverage()` from the same block list the agent reads. A model asked to
+ * declare its own blindness would be a model with an incentive, and hard rule
+ * 20 already says the model does not write quantities — this is the same
+ * doctrine one level up: the model does not write the verdict on its own
+ * evidence either. Code writes it, on every run, and the model never sees the
+ * field.
+ *
+ * IT IS PRESENT ON EVERY STORED PAYLOAD, not only on a refusal. That is what
+ * makes it a distinction rather than a marker: after this change
+ * `payload->'coverage'->>'verdict'` answers "could this run see?" for every row
+ * in `digests`, and its ABSENCE identifies a row written before the field
+ * existed — which is the honest answer for the one stored quiet digest, rather
+ * than back-filling a verdict nobody computed.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY A PAYLOAD FIELD AND NOT A THIRD `digests.status` VALUE
+ * ---------------------------------------------------------------------------
+ * A third status is the better shape and it is not available here.
+ * `digests.status` carries `check (status in ('material','quiet'))` from
+ * 0003_strategist.sql, so writing `'insufficient_data'` needs migration 0009 —
+ * and until that migration is APPLIED, every insufficient run would raise
+ * 23514, roll back, and surface as an opaque database error. That is exactly
+ * the 0007 class of defect this phase exists to close: code reserving under a
+ * name a CHECK constraint refuses, invisible until something executed it. A
+ * distinction that only works on a database nobody has migrated yet is not a
+ * distinction; it is a dead button with a nicer name.
+ *
+ * `payload` is `jsonb not null` and is already where this contract grows: it
+ * carries three fields `StrategistPayload` does not declare (`actions[].type`
+ * and `.spec`, `decisions[].cap` and `.kill_condition`, `ledger_review[]`). It
+ * is queryable — `where payload->'coverage'->>'verdict' = 'insufficient'` — so
+ * this is a typed field in a structured column, not a note buried in a blob.
+ *
+ * THE DURABLE FIX, reported rather than improvised: migration 0009 adds
+ * `'insufficient_data'` to the CHECK, `DigestStatus` gains it in
+ * src/lib/types/db.ts, and `coverage.verdict` becomes the thing that decides
+ * it. Nothing else about this file changes when that happens.
+ */
+export interface StoredStrategistPayload extends StrategistResponse {
+  coverage: StrategistCoverage;
+}
 
 /* ========================================================== the checks === */
 
@@ -1008,6 +1074,234 @@ export function strategistPreflight(data: StrategistData): void {
   }
 }
 
+/* =================================================== the insufficient run == */
+
+/**
+ * ===========================================================================
+ * "I CANNOT SEE" IS AN ANSWER, AND IT COSTS NOTHING TO GIVE
+ * ===========================================================================
+ * `assessCoverage()` (src/lib/agent/strategist/blocks.ts) decides the FACTS:
+ * which of the three judgement corpora are dark, in what way, and what measure
+ * proves it. This section decides the WORDS, and then composes the whole
+ * payload in code.
+ *
+ * NO MODEL RUNS ON THIS PATH. Hard rule 9 is estimate before spend and its
+ * sharper half is that the cheapest correct answer is not a model call. There
+ * is nothing here for a model to judge — the finding is that there is nothing
+ * to judge — so the run makes zero calls, spends zero tokens, and reports all
+ * three as zeros rather than as a model name nobody used.
+ *
+ * NO LAW AND NO JUDGE RUN ON THIS PATH EITHER, and that is a decision rather
+ * than an oversight. The Law exists to catch a model inventing a figure. Every
+ * string below is a code-owned constant containing no digit, and every figure
+ * that appears anywhere in this payload arrives as a `basis` entry copied
+ * verbatim out of `collectMeasures()`. Running an invention detector over text
+ * that cannot invent is theatre, and it buys a failure mode — a Law violation
+ * on this path has no retry to offer, because there is no author to complain
+ * to. What replaces it is a PROBE: tests/strategist-probes.test.ts runs the
+ * composed payload through the real schema and the real source-key check and
+ * asserts both clear. The gate is executed; it is executed in the suite rather
+ * than on every run.
+ *
+ * WHY IT STILL WRITES A ROW. The screen reads the LATEST digest. A refusal that
+ * returned only an error card would vanish on reload and the operator would be
+ * looking at the previous quiet digest again — the same dead-button reading,
+ * one costume over. The run happened, so the run is a fact, and the fact is
+ * stored with its evidence.
+ */
+
+/** What a human is told about one dark corpus. No digits, in either language. */
+interface GapCopy {
+  /** What cannot be judged while it is dark. True in every state of it. */
+  blind_to_ar: string;
+  blind_to_en: string;
+  /** The ONE action that fills it. */
+  fill_ar: string;
+  fill_en: string;
+  /** What filling it would unlock, for `request_computation.would_unlock_ar`. */
+  unlocks_ar: string;
+}
+
+/**
+ * One entry per corpus, and each sentence is written to hold in EVERY state of
+ * that corpus — read-and-empty, read-and-too-thin, or not read at all. That is
+ * why they say what cannot be built rather than what is or is not in the table:
+ * "there is no analysis to build a statement on" is true whether the table is
+ * empty or was never opened, while "the table is empty" would be a claim about
+ * a read nobody performed. The precise state travels in English, per gap, in
+ * `operator_notes` — where the operator, not the client, reads it.
+ */
+const GAP_COPY: Record<StrategistCorpus, GapCopy> = {
+  post_analyses: {
+    blind_to_ar: 'لا يوجد تحليل نبني عليه أي كلام عن نوع المحتوى الذي يشتغل.',
+    blind_to_en:
+      'No cluster aggregate exists, so nothing about which kind of content works can be stated as measurement.',
+    fill_ar: 'افتحوا شاشة اللوحة وشغّلوا تحليل المنشورات حتى يكتمل.',
+    fill_en: 'Open /board and run "Analyze all" until it reads complete.',
+    unlocks_ar: 'أي نوع محتوى يشتغل فعلاً، برقم لا برأي.',
+  },
+  comments: {
+    blind_to_ar: 'لا توجد بين أيدينا تعليقات نقرأ منها ما يسأل عنه الجمهور.',
+    // "hard rule ten", spelled, for the reason blocks.ts spells it: a bare
+    // numeral loose in prose is a quantity somebody could quote with no key
+    // behind it, and every string here ends up inside linted text.
+    blind_to_en:
+      'The comment corpus supports no reading, so nothing about what the audience asks or wants can be stated. Aggregate only — hard rule ten.',
+    fill_ar: 'شغّلوا سحب التعليقات من شاشة البيانات، ثم ولّدوا قراءة الجمهور.',
+    fill_en:
+      'Run /data → Automated scrapes → "Run comment scrape" (aggregate only), then /audience → Generate.',
+    unlocks_ar: 'ما الذي يسأل عنه الجمهور فعلاً، بصيغة تجميعية.',
+  },
+  profile_snapshots: {
+    blind_to_ar: 'لا توجد قراءتان مؤرّختان للمتابعين، وبدون نقطتين لا حركة يمكن قياسها.',
+    blind_to_en:
+      'Fewer than two dated profile observations exist on either account, so no follower movement can be measured at all.',
+    fill_ar: 'شغّلوا سحب الحسابات من شاشة البيانات، وأعيدوه لاحقاً حتى تتوفّر نقطتان مؤرّختان.',
+    fill_en:
+      'Run /data → Automated scrapes → "Run profile scrape", and run it again later so two dated points exist.',
+    unlocks_ar: 'حركة المتابعين بين قراءتين مؤرّختين.',
+  },
+};
+
+/** The state, in the operator's language. Kept out of the Arabic on purpose. */
+const GAP_STATE_EN: Record<CorpusGap['state'], string> = {
+  absent: 'read, and there is nothing in it',
+  too_thin: 'read, and there is not enough of it to support a judgement',
+  uncounted: 'NOT READ this run, so its state is unknown — which is not the same as empty',
+};
+
+/** One operator-facing line per gap: the corpus, its state, and the one fix. */
+export function gapNote(gap: CorpusGap): string {
+  const copy = GAP_COPY[gap.corpus];
+  return `${gap.corpus} — ${GAP_STATE_EN[gap.state]}. ${copy.blind_to_en} Fill: ${copy.fill_en}`;
+}
+
+/**
+ * The headline, the client line and the escalation. Code-owned, digit-free, and
+ * the same every time — an insufficient run has exactly one thing to say and
+ * saying it differently each week would be the padding this product refuses.
+ */
+const INSUFFICIENT_HEADLINE_AR = 'لا يوجد ما يكفي للحكم بعد — وهذا ما ينقص بالضبط';
+
+/**
+ * WHAT THE CLIENT WOULD RECEIVE, and what he would not. The fills below are
+ * scrapes and analyses the OPERATOR runs; a client digest listing them would be
+ * this studio's chores sent out as if they were his. So the client line says
+ * the true thing in his register and stops, and every fill lives in the
+ * actions, whose owner is `operator`, and in `operator_notes`, which are never
+ * sent.
+ */
+const INSUFFICIENT_CLIENT_DIGEST_AR = [
+  // Not «ما رح نبعت» — this text IS the thing a human would send, so a line
+  // about sending it would be the product narrating a delivery it does not
+  // make (hard rule 1). It says what is true about the WEEK instead.
+  'ما في قراءة هالأسبوع، وهاد مقصود.',
+  'القياسات اللي بتقوم عليها القراءة لسّه ناقصة، وأي رأي فوقها بصير تخمين.',
+  'عم نكمّلها، وبنرجعلك بقراءة حقيقية — مش بتعبئة فراغ.',
+].join('\n');
+
+const INSUFFICIENT_ESCALATION_AR =
+  'هذا التقرير لا يحكم على شيء: المصادر التي يقوم عليها الحكم غير متوفّرة بعد. أدناه ما ينقص بالضبط، وما الذي يفتحه كل واحد منها.';
+
+/**
+ * The whole payload for a run that cannot see, assembled from the gaps.
+ *
+ * `status: 'material'` and the reasoning is the point of this whole change. It
+ * is emphatically NOT `'quiet'` — that value means "the period was read and
+ * nothing moved", which is the false sentence being replaced. And it is not a
+ * neutral third thing, because the column has no third thing (see
+ * StoredStrategistPayload). Of the two values that exist, `'material'` is the
+ * true one: this run changes what the operator does this week, it carries named
+ * actions and an escalation, and it must not be read as a week with nothing in
+ * it. The empty lists under a `'material'` header provoke the question "why is
+ * this empty?" — whose answer is `coverage.gaps`, right there in the same row.
+ * The empty lists under `'quiet'` provoke no question at all, which is exactly
+ * how a working digest got read as a dead button.
+ *
+ * The action list is NOT trimmed to `meta.action_budget`. The budget bounds what
+ * a strategist may ASK A HUMAN TO DO on top of their week; these are not new
+ * work, they are the read that has to exist before any of this product means
+ * anything, and dropping one to fit a ceiling would hide a corpus. It is the one
+ * rule this path knowingly does not apply, and it is stated here rather than
+ * discovered by someone wondering why `commitmentsCheck` was skipped.
+ */
+export function composeInsufficientPayload(
+  data: StrategistData,
+  coverage: StrategistCoverage,
+): StoredStrategistPayload {
+  const due = decisionsDueForReview(data);
+
+  // Every receipt the gaps carry, de-duplicated by key. A gap whose proof is an
+  // absence contributes nothing — an absence emits no key, and an escalation
+  // with an empty receipt is the honest shape when the thing that needs a human
+  // is a measurement that was never taken.
+  const seen = new Set<string>();
+  const receipts: BasisRef[] = [];
+  for (const gap of coverage.gaps) {
+    for (const ref of gap.basis) {
+      if (seen.has(ref.source_key)) continue;
+      seen.add(ref.source_key);
+      receipts.push(ref);
+    }
+  }
+
+  const notes = [
+    'Coverage: insufficient. Every corpus a judgement rests on is dark, so this run made NO model call, spent nothing, and states no finding. What is recorded is the blindness itself, with the measure that proves each half of it and the one action that fills it.',
+    ...coverage.gaps.map(gapNote),
+  ];
+
+  if (due.length > 0) {
+    notes.push(
+      `${due.length} open decision(s) are past their review date and carry NO verdict from this run: judging them needs the data that is missing. They stay open and stay visible on /decisions — that is the ledger working, not a step skipped.`,
+    );
+  }
+
+  return {
+    period: { from: data.meta.period.from, to: data.meta.period.to },
+    status: 'material',
+    headline_ar: INSUFFICIENT_HEADLINE_AR,
+    // Nothing was judged, and every list says so by being empty rather than by
+    // being filled with a re-phrasing of the same sentence.
+    deltas: [],
+    wins: [],
+    concerns: [],
+    corrections: [],
+    decisions: [],
+    actions: [
+      {
+        type: 'flag_needs_human',
+        do_ar: 'اقرأوا هذا قبل أي شيء آخر هالأسبوع: القراءة مش ناقصة رأي، ناقصة قياس.',
+        owner: 'operator',
+        by_date: null,
+        decision_index: null,
+        spec: {
+          reason_ar: INSUFFICIENT_ESCALATION_AR,
+          // Not 'now'. Nothing broke this week; the corpora have been dark since
+          // the beginning, and an urgency that cries every run stops being read.
+          urgency: 'this_week',
+          basis: receipts,
+        },
+      },
+      ...coverage.gaps.map((gap) => ({
+        type: 'request_computation' as const,
+        do_ar: GAP_COPY[gap.corpus].fill_ar,
+        owner: 'operator' as const,
+        by_date: null,
+        decision_index: null,
+        spec: {
+          question_en: GAP_COPY[gap.corpus].fill_en,
+          would_unlock_ar: GAP_COPY[gap.corpus].unlocks_ar,
+        },
+      })),
+    ],
+    ledger_review: [],
+    needs_human: true,
+    client_digest_ar: INSUFFICIENT_CLIENT_DIGEST_AR,
+    operator_notes: notes,
+    coverage,
+  };
+}
+
 /* =============================================================== prompt == */
 
 /** Output ceiling for one strategist call. Covers thinking plus the payload. */
@@ -1143,7 +1437,10 @@ interface StrategistPersisted {
   /** Always false. This path requests actions; it does not run them. */
   actions_executed: boolean;
   needs_human: boolean;
+  /** Null when no Judge ran — an insufficient-data run calls no model at all. */
   judge_score: number | null;
+  /** Whether the run could see anything, and what was dark. Computed in code. */
+  coverage: StrategistCoverage;
 }
 
 /**
@@ -1164,9 +1461,9 @@ interface StrategistPersisted {
  * tell the operator the run failed while its digest sits in the table.
  */
 async function persistStrategist(
-  payload: StrategistResponse,
+  payload: StoredStrategistPayload,
   data: StrategistData,
-  brain: BrainReport,
+  brain: BrainReport | null,
 ): Promise<StrategistPersisted> {
   const db = supabaseAdmin();
 
@@ -1187,7 +1484,25 @@ async function persistStrategist(
     .select('*')
     .single();
 
-  if (error) throw new Error(`Could not save the digest: ${error.message}`);
+  if (error) {
+    // A WRITE THAT FAILS MUST NAME ITS FIX, and the fix for this one is almost
+    // always a migration. `digests.status` carries a CHECK from 0003 and
+    // `payload` is jsonb — a rejected insert here is either a status value the
+    // constraint does not know or a column this code believes in and the
+    // database does not. Both are the 0007 class: code and schema disagreeing,
+    // invisible until something executed it. Reported as HttpError so the hint
+    // survives all the way to the failure card; a bare Error would arrive on
+    // screen as a Postgres sentence with no action attached to it.
+    throw new HttpError(
+      500,
+      `Could not save the digest: ${error.message}`,
+      'The run completed and nothing was stored. If the message names a check constraint or an ' +
+        'unknown column, the database is behind the code: apply every file in supabase/migrations/ ' +
+        'that is newer than the last one you ran (Supabase dashboard → SQL editor → paste → Run; ' +
+        'they are additive and rewrite nothing). Otherwise confirm SUPABASE_SERVICE_ROLE_KEY is the ' +
+        'service-role key — RLS on digests is deny-all and the anon key writes nothing.',
+    );
+  }
   const digest = inserted as DigestRow;
 
   const ledgerWriteErrors: string[] = [];
@@ -1277,21 +1592,65 @@ async function persistStrategist(
     computation_requests: countActions('request_computation'),
     human_flags: countActions('flag_needs_human'),
     actions_executed: false,
-    needs_human: payload.needs_human || brain.needsHuman,
-    judge_score: brain.judge.score,
+    needs_human: payload.needs_human || (brain?.needsHuman ?? false),
+    // Null when no Judge ran, which is the honest value and reads as an em-dash
+    // on screen. Never 0 — a score of zero is a verdict, and no verdict was given.
+    judge_score: brain === null ? null : brain.judge.score,
+    coverage: payload.coverage,
   };
 }
 
 /* ================================================================== run == */
 
 /**
- * One strategist run: load → refuse or spend → Law → Judge → at most one
- * retry → persist.
+ * The model name reported by a run that called no model.
+ *
+ * Hard rule 2 in the one place it is easiest to break: absent is an em-dash,
+ * never a plausible stand-in. Reported beside `attempts: 0` and zero tokens, so
+ * the three of them together say the same thing three ways and no reader has to
+ * infer it from one of them.
+ */
+export const NO_MODEL_RAN = '—';
+
+/**
+ * Runs one stage and makes sure a failure inside it arrives with a fix attached.
+ *
+ * WHY THIS EXISTS. `errorResponse()` turns an HttpError into `{error, hint}` and
+ * anything else into `{error, hint: null}`, and the digest screen renders the
+ * hint as the actionable half of its failure card. So an ordinary `Error`
+ * thrown deep in a read — `Could not read decisions: …` — reaches the operator
+ * as a Postgres sentence with no action beside it, which is a P1 in this
+ * product's terms: the click ended, and the screen cannot say what to do.
+ * An HttpError already carrying a hint passes through untouched.
+ */
+async function stage<T>(label: string, hint: string, work: () => Promise<T>): Promise<T> {
+  try {
+    return await work();
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    const message = err instanceof Error ? err.message : 'Unexpected failure.';
+    throw new HttpError(500, `${label}: ${message}`, hint);
+  }
+}
+
+const LOAD_HINT =
+  'Nothing was written. Confirm SUPABASE_SERVICE_ROLE_KEY is the service-role key (RLS is deny-all, ' +
+  'so the anon key reads nothing), and that every file in supabase/migrations/ has been applied — a ' +
+  'table this read names and the database does not have fails exactly here.';
+
+/**
+ * One strategist run: load → refuse → answer for free if it cannot see → else
+ * spend → Law → Judge → at most one retry → persist.
  *
  * The retry budget is one, for the reason stated in
  * src/lib/agent/features/types.ts: looping on a model that keeps failing burns
  * money and converges on nothing, and a second failure is a human's problem —
  * it is stored, flagged `needs_human`, and surfaced.
+ *
+ * EVERY EXIT FROM THIS FUNCTION IS RENDERABLE. There are exactly four: an
+ * HttpError with a message and a hint (the failure card), the insufficient-data
+ * digest, a digest, or a digest flagged `needs_human`. There is no path that
+ * returns nothing, and no path that throws something without a fix attached.
  */
 async function runStrategist(rawInput: unknown, quality: Quality): Promise<FeatureRunOutcome> {
   const parsedInput = strategistInputSchema.safeParse(rawInput ?? {});
@@ -1306,14 +1665,39 @@ async function runStrategist(rawInput: unknown, quality: Quality): Promise<Featu
   }
   const input = parsedInput.data;
 
-  const data = await loadStrategistData(supabaseAdmin(), {
-    today: todayInAmman(),
-    periodDays: input.period_days,
-    actionBudget: input.action_budget,
-  });
+  const data = await stage('Could not assemble the digest', LOAD_HINT, () =>
+    loadStrategistData(supabaseAdmin(), {
+      today: todayInAmman(),
+      periodDays: input.period_days,
+      actionBudget: input.action_budget,
+    }),
+  );
 
   // Before the model call, not after it.
   strategistPreflight(data);
+
+  /* --------------------------------------------- can this run see anything? --
+   *
+   * Computed from the loaded data, before the blocks are rendered and before a
+   * single token is spent. When the answer is no, the run answers for free and
+   * ends here — see composeInsufficientPayload() for why it still writes a row,
+   * why it calls neither model nor Judge, and why its status is 'material'.
+   */
+  const coverage = assessCoverage(data);
+  if (coverage.verdict === 'insufficient') {
+    const payload = composeInsufficientPayload(data, coverage);
+    const persisted = await persistStrategist(payload, data, null);
+    return {
+      feature: 'strategist',
+      model: NO_MODEL_RAN,
+      attempts: 0,
+      usage: { input_tokens: 0, output_tokens: 0 },
+      result: payload,
+      persisted,
+      // No `brain`: there is no Law report and no Judge verdict to report, and
+      // an empty one would read as "reviewed and found clean".
+    };
+  }
 
   const blocks = renderStrategistBlocks(data);
   // The evidence view of the same blocks. Built here, beside the render, so the
@@ -1402,14 +1786,20 @@ async function runStrategist(rawInput: unknown, quality: Quality): Promise<Featu
     needsHuman: outcome.verdict.verdict === 'fail' || outcome.verdict.needs_human,
   };
 
-  const persisted = await persistStrategist(value, data, brain);
+  // The verdict travels with the digest even when it is 'sufficient', and its
+  // `gaps` still name whatever is dark. A material week written over two live
+  // corpora and one empty one is a true digest with a stated blind spot, and
+  // the row says which — so "why does this digest never mention the audience?"
+  // has an answer stored beside it rather than in somebody's memory.
+  const stored: StoredStrategistPayload = { ...value, coverage };
+  const persisted = await persistStrategist(stored, data, brain);
 
   return {
     feature: 'strategist',
     model: run.model,
     attempts,
     usage,
-    result: value,
+    result: stored,
     persisted,
     brain,
   };

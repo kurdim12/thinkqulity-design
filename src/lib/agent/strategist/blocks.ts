@@ -90,6 +90,7 @@ import { buildTiming, MIN_WINDOW_N, type TimingResult } from '../../audience/tim
 import type {
   Account,
   AudienceInsightRow,
+  BasisRef,
   BrandRow,
   ConceptFormat,
   ConceptRow,
@@ -272,6 +273,19 @@ export interface StrategistData {
   profiles: Record<Account, ProfileObservation | null>;
   performance: PerformanceInput;
   audience: AudienceInsightRow | null;
+  /**
+   * Rows in `comments`. A COUNT of zero is a measurement and keeps its key —
+   * that is the whole point of counting it separately from `audience`, which is
+   * the generated INSIGHT and not the corpus. Before this field existed the
+   * audience block asserted "the comment corpus is empty" in prose whenever no
+   * insight had been generated, which is a different fact and was never read.
+   *
+   * `undefined` means NOT COUNTED, and is deliberately a third state rather
+   * than a zero: "there are no comments" and "nobody looked" support completely
+   * different sentences, and only one of them is a measurement.
+   * `loadStrategistData()` always sets it; a hand-built fixture may not.
+   */
+  comments_count?: number;
   content: ContentStateInput;
   /** Past decisions, newest first, with the status a review gave them. */
   ledger: DecisionRow[];
@@ -859,11 +873,28 @@ function audienceBlock(data: StrategistData): StrategistBlock {
     'Aggregate only. Hard rule ten: commenters are an audience, not targets — no handle and no per-person figure reaches this block, by construction.',
   );
 
+  // THE CORPUS, COUNTED, BEFORE ANYTHING IS SAID ABOUT IT — and emitted on
+  // every path, including the one where no insight exists. A count of zero is a
+  // measurement and keeps its key; it is the receipt an insufficient-data
+  // verdict cites instead of describing a feeling. See assessCoverage().
+  const commentCount = data.comments_count;
+  if (commentCount === undefined) {
+    absent(
+      d,
+      'audience.comments.count',
+      'the comment corpus was not counted for this run, so whether anything is stored in it is unknown — which is not the same as knowing it is empty.',
+    );
+  } else {
+    always(d, 'audience.comments.count', 'comments stored for this brand', commentCount);
+  }
+
   if (!insight) {
     absent(
       d,
       'audience',
-      'no audience insight has been generated and the comment corpus is empty, so nothing about what the audience says, asks or wants can be stated. Any such claim is a hypothesis.',
+      commentCount === 0
+        ? 'the comment corpus is empty, so nothing about what the audience says, asks or wants can be stated. Any such claim is a hypothesis.'
+        : 'no audience insight has been generated, so nothing about what the audience says, asks or wants can be stated. Any such claim is a hypothesis.',
     );
     return d;
   }
@@ -1185,6 +1216,149 @@ export function collectSourceKeys(data: StrategistData): Set<string> {
   return new Set(collectMeasures(data).map((measure) => measure.key));
 }
 
+/* ============================================ what the machine cannot see == */
+
+/**
+ * ===========================================================================
+ * "NOTHING MOVED" AND "I CANNOT SEE" ARE DIFFERENT ANSWERS
+ * ===========================================================================
+ * Everything above already represents an absence AS an absence. What was
+ * missing was a name for the state where EVERY absence lands on the same side:
+ * the corpora a judgement rests on are all dark, so the run has nothing to be
+ * quiet ABOUT.
+ *
+ * That was not a hypothetical. A digest ran against this database and returned
+ * `status: 'quiet'`, the headline «لا جديد يستحق قرار», and empty lists — a
+ * correct quiet digest by the letter of the rule, over post_analyses = 0,
+ * comments = 0 and profile_snapshots = 0. The machine was right and the
+ * operator read it as a dead button, because the honest answer was never
+ * "nothing happened this week"; it was "I cannot see anything yet, and here is
+ * what would let me."
+ *
+ * THE THREE CORPORA, and why these three. Each one is the sole source of a
+ * different KIND of judgement, and none of the three can be substituted for
+ * another:
+ *
+ *   post_analyses      — what kind of content works. Without it there is no
+ *                        cluster aggregate and every statement about format,
+ *                        pillar or theme is a hypothesis wearing a number.
+ *   comments           — what the audience asks for. Aggregate only (hard rule
+ *                        10); without it the audience block is one absence.
+ *   profile_snapshots  — whether the account is growing. A delta needs TWO
+ *                        dated observations, so one is as blind as none.
+ *
+ * The engagement snapshot is deliberately NOT on that list. One snapshot of 320
+ * posts supports DESCRIPTION — an average, a strongest post — and description
+ * is not judgement. It is exactly what the quiet digest already had, and having
+ * it is what made the quiet verdict look defensible.
+ *
+ * THE VERDICT RULE, stated rather than tuned: the run is `insufficient` when
+ * EVERY corpus on that list is dark. One live corpus is one real judgement
+ * available, and a quiet verdict over it is a claim about data the run actually
+ * has. All three dark is a claim about data nobody collected.
+ *
+ * AN UNCOUNTED CORPUS COUNTS AS DARK. "I did not read it" is not evidence of
+ * sight, and the conservative direction for a verdict that REFUSES to judge is
+ * to refuse. It is a distinct `state` on the gap so a reader can tell it from a
+ * corpus that was read and found empty.
+ *
+ * NO ARITHMETIC AND NO NEW PROSE. This function reads the same block list
+ * everything else here reads, cites the measure that PROVES each gap, and cites
+ * NOTHING where the proof is an absence — because an absence emits no key, and
+ * a receipt that resolved to a hole is the failure this module exists to
+ * prevent. The words a human reads are chosen in
+ * src/lib/agent/features/strategist.ts; this function decides only the facts.
+ */
+export type StrategistCorpus = 'post_analyses' | 'comments' | 'profile_snapshots';
+
+/**
+ * Which flavour of dark.
+ *   absent    — read, and there is nothing in it.
+ *   too_thin  — read, and there is not enough of it to support a judgement.
+ *               One dated profile observation is the only instance today.
+ *   uncounted — not read this run, so its state is unknown.
+ */
+export type CorpusGapState = 'absent' | 'too_thin' | 'uncounted';
+
+export interface CorpusGap {
+  corpus: StrategistCorpus;
+  state: CorpusGapState;
+  /**
+   * The keyed measure that proves the gap, quoted verbatim. `[]` when the proof
+   * is itself an absence — profile depth is one such: "no snapshot was ever
+   * recorded" is rendered as an absence and therefore has no key to cite.
+   */
+  basis: BasisRef[];
+}
+
+export interface StrategistCoverage {
+  verdict: 'sufficient' | 'insufficient';
+  /** Every dark corpus, in the order above. `[]` when all three are live. */
+  gaps: CorpusGap[];
+}
+
+/** The corpora a judgement rests on. The verdict is about ALL of them. */
+export const JUDGEMENT_CORPORA: readonly StrategistCorpus[] = [
+  'post_analyses',
+  'comments',
+  'profile_snapshots',
+];
+
+/**
+ * How many dated observations an account has, for the one purpose that matters:
+ * can a movement be measured at all. `2` means "two or more" — `previous` is
+ * populated whenever a second row exists — and the caller never needs the true
+ * depth, so a number nobody counted exactly is never returned as if it were.
+ */
+export function observationDepth(observed: ProfileObservation | null): 0 | 1 | 2 {
+  if (!observed) return 0;
+  return observed.previous ? 2 : 1;
+}
+
+export function assessCoverage(data: StrategistData): StrategistCoverage {
+  const measures = collectMeasures(data);
+  const cite = (key: string): BasisRef[] => {
+    const found = measures.find((measure) => measure.key === key);
+    // Verbatim, from the same list the agent is shown. A gap that cannot find
+    // its measure cites nothing rather than citing a key that resolves to air.
+    return found ? [{ source_key: found.key, value: found.value }] : [];
+  };
+
+  const gaps: CorpusGap[] = [];
+
+  const analyses = data.performance.analyses_count;
+  if (analyses === null) {
+    gaps.push({ corpus: 'post_analyses', state: 'uncounted', basis: [] });
+  } else if (analyses === 0) {
+    gaps.push({
+      corpus: 'post_analyses',
+      state: 'absent',
+      basis: cite('performance.analyses.count'),
+    });
+  }
+
+  const comments = data.comments_count;
+  if (comments === undefined) {
+    gaps.push({ corpus: 'comments', state: 'uncounted', basis: [] });
+  } else if (comments === 0) {
+    gaps.push({ corpus: 'comments', state: 'absent', basis: cite('audience.comments.count') });
+  }
+
+  const depths = ACCOUNTS.map((account) => observationDepth(data.profiles[account]));
+  if (depths.every((depth) => depth === 0)) {
+    gaps.push({ corpus: 'profile_snapshots', state: 'absent', basis: [] });
+  } else if (depths.every((depth) => depth < 2)) {
+    // Rows exist and still no movement can be read off them. Saying "absent"
+    // here would send the operator to run a scrape they have already run.
+    gaps.push({ corpus: 'profile_snapshots', state: 'too_thin', basis: [] });
+  }
+
+  return {
+    verdict: gaps.length === JUDGEMENT_CORPORA.length ? 'insufficient' : 'sufficient',
+    gaps,
+  };
+}
+
 /* ==================================================== what counts as evidence */
 
 /**
@@ -1445,13 +1619,26 @@ export async function loadStrategistData(
   const limit = opts.postScanLimit ?? MAX_POSTS_SCAN;
   const thresholds: AnomalyThresholds = { ...DEFAULT_THRESHOLDS, ...opts.thresholds };
 
-  const [brandRes, guidelineRes, profileRes, snapshotRes, audienceRes, conceptRes, ledgerRes] =
-    await Promise.all([
+  const [
+    brandRes,
+    guidelineRes,
+    profileRes,
+    snapshotRes,
+    audienceRes,
+    commentsRes,
+    conceptRes,
+    ledgerRes,
+  ] = await Promise.all([
       db.from('brand').select('*').eq('id', 1).maybeSingle(),
       db.from('brand_guidelines').select('version,status,created_at').order('version', { ascending: false }).limit(1),
       db.from('profile_snapshots').select('*').order('taken_on', { ascending: false }).limit(PROFILE_HISTORY_SCAN),
       db.from('snapshots').select('*').order('taken_on', { ascending: false }).limit(1),
       db.from('audience_insights').select('*').order('created_at', { ascending: false }).limit(1),
+      // THE CORPUS, not the insight. Counted rather than sampled: nothing here
+      // reads a comment, so hard rule 10 is kept by construction — a count
+      // carries no handle and no per-person figure. `head: true` so an account
+      // with fifty thousand comments costs the same read as one with none.
+      db.from('comments').select('id', { count: 'exact', head: true }),
       db.from('concepts').select('*').order('created_at', { ascending: false }).limit(500),
       db.from('decisions').select('*').order('created_at', { ascending: false }).limit(LEDGER_SCAN),
     ]);
@@ -1462,6 +1649,7 @@ export async function loadStrategistData(
     ['profile snapshots', profileRes],
     ['snapshots', snapshotRes],
     ['audience insights', audienceRes],
+    ['comments', commentsRes],
     ['concepts', conceptRes],
     ['decisions', ledgerRes],
   ] as const) {
@@ -1610,6 +1798,10 @@ export async function loadStrategistData(
       analyses_count: analysesCount,
     },
     audience: (audienceRes.data as AudienceInsightRow[] | null)?.[0] ?? null,
+    // `count` is null only if PostgREST answered without one — the same shape a
+    // head count of a table that does not exist returns. That is "not counted",
+    // and it stays undefined rather than becoming a zero nobody measured.
+    comments_count: commentsRes.count ?? undefined,
     content: { counts, shipped },
     ledger: (ledgerRes.data as DecisionRow[] | null) ?? [],
     meta: {

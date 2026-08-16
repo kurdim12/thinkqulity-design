@@ -2,6 +2,16 @@ import type { Account, SnapshotDiff, SnapshotRow, SnapshotStats } from '@/lib/ty
 
 const ACCOUNTS: readonly Account[] = ['personal', 'academy'];
 
+/**
+ * How old a snapshot may be before a client report refuses to be written from
+ * it. It lives here, in the pure module both halves can reach, because it is
+ * two different things at once: a rule the report feature ENFORCES on the
+ * server, and a sentence the dashboard SAYS to an operator. Written twice it
+ * drifts, and a screen that promises 45 while the route refuses at 30 is worse
+ * than a screen that promises nothing.
+ */
+export const MAX_SNAPSHOT_AGE_DAYS = 45;
+
 function delta(next: number | null, prev: number | null): number | null {
   if (next === null || prev === null) return null;
   return next - prev;
