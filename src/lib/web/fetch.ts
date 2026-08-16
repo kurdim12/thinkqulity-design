@@ -38,8 +38,10 @@ import type { RetrievalEvidence } from './facts.ts';
  * guard re-run on every hop, a body read through a capped reader instead of
  * `arrayBuffer()`, and a content-type allow-list.
  *
- * (It does NOT copy src/lib/brain/canon/embed.ts, which has no timeout at all.
- * That is a pre-existing gap, not a pattern.)
+ * (src/lib/brain/canon/embed.ts had no timeout at all when this was written and
+ * was called out here as a gap rather than a pattern. It has one now, on these
+ * same terms; the note beside EMBED_TIMEOUT_MS states what its bound covers and
+ * what it deliberately does not.)
  *
  * ---------------------------------------------------------------------------
  * WHY NO HOST ALLOW-LIST, AND WHAT REPLACES IT
@@ -138,10 +140,62 @@ const ALLOWED_CONTENT_TYPES = [
  * Suffixes that never name a public host. `arpa` is a real public TLD and is
  * here anyway: `in-addr.arpa` and `home.arpa` are the two things under it worth
  * refusing, and nothing under it is worth reading.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS LIST EXISTS AT ALL, GIVEN THE HEADER SAYS ENUMERATIONS LOSE RACES
+ * ---------------------------------------------------------------------------
+ * The positive rule above it does the heavy lifting: a host must LOOK LIKE A
+ * PUBLIC DNS NAME, which refuses every IP literal in every spelling with no
+ * table to keep current. But `PUBLIC_TLD` checks the SHAPE of the final label,
+ * not its MEMBERSHIP of the root zone, and an internal suffix is a perfectly
+ * well-shaped ASCII label. That is the gap `.svc` walked through:
+ * `https://kubernetes.default.svc/` is the in-cluster API server, `svc` is three
+ * ASCII letters, and nothing here was refusing it.
+ *
+ * THE HONEST INVERSION IS NOT AVAILABLE HERE, and saying so is better than
+ * pretending this list is one. The membership test that would close this
+ * completely is the IANA root zone — roughly fourteen hundred delegated TLDs —
+ * and that is DATA, not logic. It cannot be written from memory without
+ * inventing entries, which is hard rule 2 applied to a source file, and an
+ * allow-list nobody refreshes silently refuses next year's real web. So the
+ * shape rule stays the primary check and this list narrows it.
+ *
+ * WHAT THAT LEAVES OPEN, PLAINLY: an internal suffix nobody has thought of, and
+ * a made-up TLD (`https://intranet.acme-corp-internal/`) still passes the shape
+ * check. On Workers `global_fetch_strictly_public` refuses the connection
+ * whatever DNS answers, which is the belt; in `next dev` and in tests, nothing
+ * does. Every entry below is a suffix that is NOT delegated in the root zone and
+ * is in live use inside private networks, and the near-miss control in
+ * tests/web-fetch.test.ts pins that a public name merely CONTAINING one of these
+ * labels (`mail.google.com`, `svc.example.org`) is still allowed — a reserved
+ * suffix is the FINAL label and nothing else.
  */
 const RESERVED_SUFFIXES = [
   'local', 'localhost', 'localdomain', 'internal', 'intranet', 'private', 'corp',
   'home', 'lan', 'test', 'example', 'invalid', 'onion', 'arpa', 'alt',
+  // Kubernetes. `<service>.<namespace>.svc` is the in-cluster short form and
+  // `svc.cluster.local` the long one; the long one already ended in `local`,
+  // the short one ended in nothing this list knew. `cluster` is the same name
+  // with `--cluster-domain` set to a bare label.
+  'svc', 'cluster',
+  // Consul's service-discovery suffix (`<service>.service.consul`). Never
+  // delegated, and it resolves only against a local agent.
+  'consul',
+  // The third of ICANN's own high-collision strings. `corp` and `home` were
+  // already here; `mail` is the one that was left out of a set of three, and
+  // none of the three is delegated.
+  'mail',
+  // The same class as `lan` and `localdomain`: default LAN/DHCP search suffixes
+  // that a public resolver never answers for.
+  'localnet', 'domain',
+  /* `i2p` IS DELIBERATELY ABSENT, and the absence is the interesting entry.
+   * It is the same class as `onion` and it is certainly not public — but it
+   * carries a DIGIT, so PUBLIC_TLD refuses it several lines earlier as
+   * `not-a-public-name` and this list is never consulted for it. Adding it
+   * would put a rule in a branch no input can reach, which reads as a
+   * guarantee and is not one. The shape rule already owns every suffix that
+   * is not pure ASCII letters; this list only has to cover the ones that are.
+   * tests/web-fetch.test.ts pins the refusal AND the reason it comes from. */
 ];
 
 /** A public TLD: ASCII letters, or a punycode label. Never digits. */
@@ -716,6 +770,143 @@ export function pageTitle(html: string): string | null {
   for (const [pattern, replacement] of ENTITIES) title = title.replace(pattern, replacement);
   title = title.replace(/\s+/gu, ' ').trim();
   return title.length > 0 ? title : null;
+}
+
+/* ================================================ reading the ledger back == */
+
+/**
+ * How much of a fetched page the operator's screen shows. Generous, because the
+ * whole purpose of the excerpt is that a claim is quoted VERBATIM from something
+ * the operator actually read — and a claim quoted from a window too small to
+ * contain it is a claim nobody checked.
+ */
+export const EXCERPT_CHARS = 6000;
+
+const SCRIPT_OR_STYLE = /<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+const TAG = /<[^>]*>/g;
+
+/**
+ * A fetched page as readable text, bounded.
+ *
+ * FOR AN OPERATOR'S EYES AND FOR NOTHING ELSE. It is returned by the retrieval
+ * route, rendered on the screen, and NEVER stored and NEVER shown to a model —
+ * what a model may see is `renderExternalFacts()` over rows an operator chose to
+ * file, wrapped in the contract that forbids using their figures. The excerpt
+ * exists so the person writing a claim is quoting a page they read rather than
+ * one they remember.
+ *
+ * A regex over HTML, knowingly, and for `pageTitle`'s reason: nothing downstream
+ * treats this as data. A sloppy excerpt is a harder read; a sloppy CLAIM would
+ * be a different sentence, and a claim is typed by a human and stored verbatim.
+ * Script and style bodies go first so their contents do not survive tag removal.
+ */
+export function pageExcerpt(body: string, contentType: string): string {
+  const markup = contentType === 'text/html' || contentType === 'application/xhtml+xml';
+  let text = markup ? body.replace(SCRIPT_OR_STYLE, ' ').replace(TAG, ' ') : body;
+  if (markup) {
+    for (const [pattern, replacement] of ENTITIES) text = text.replace(pattern, replacement);
+  }
+  text = text.replace(/\s+/gu, ' ').trim();
+  return text.length > EXCERPT_CHARS ? `${text.slice(0, EXCERPT_CHARS)}…` : text;
+}
+
+export type EvidenceRefusal =
+  /** No such row, or a shape this code cannot read. */
+  | 'unreadable'
+  /** The attempt is still open, or it was refused or failed. */
+  | 'not-settled';
+
+export type RetrievalEvidenceResult =
+  | { ok: true; retrieval: Retrieval }
+  | { ok: false; reason: EvidenceRefusal; detail: string };
+
+/**
+ * A `web_retrievals` ROW, narrowed into the evidence a fact may be built on.
+ *
+ * ===========================================================================
+ * THIS FUNCTION IS WHY THE FILING STEP IS SAFE, AND IT IS THE WHOLE ARGUMENT
+ * ===========================================================================
+ * Filing a claim is a SECOND request: the operator retrieves a page, reads it,
+ * then writes down what it says. The obvious way to build that is for the
+ * browser to send back the URL and the instant it was shown. THAT WOULD MAKE
+ * RULE 21's TWO LOAD-BEARING FIELDS CLIENT INPUT — an external fact is exactly
+ * "a claim, the address it was published at, and the moment it was read", and a
+ * source_url a caller can type is a source_url a caller can get wrong.
+ *
+ * So the filing request carries an ID AND NOTHING ELSE THAT IDENTIFIES A PAGE.
+ * `source_url` and `retrieved_at` are read here, out of the ledger row the fetch
+ * wrote before the request went out, and they overwrite anything a caller might
+ * have sent. `externalFact()` then refuses a retrieval missing any of the three,
+ * so the two checks compose rather than overlap.
+ *
+ * A ROW MUST BE SETTLED 'ok'. 'reserved' means the attempt is still in flight;
+ * 'refused' means nothing was reached at all and `final_url` is null by database
+ * constraint; 'failed' means a request went out and did not yield a page. None
+ * of the three read anything, so none of them can be the source of a quote.
+ *
+ * `settled_at` IS THE RETRIEVAL INSTANT, not `requested_at`: the pairing CHECK
+ * guarantees it is non-null exactly when the status is not 'reserved', and it is
+ * the moment the bytes were actually in hand.
+ *
+ * PURE, so the whole narrowing runs against a truncated row, a string, a null
+ * and an in-flight row with no database anywhere — the same reason
+ * `readReserveOutcome` is lifted out of its Supabase closure.
+ */
+export function retrievalEvidenceFrom(row: unknown, pageTitle: string | null): RetrievalEvidenceResult {
+  if (!isRecord(row)) {
+    return {
+      ok: false,
+      reason: 'unreadable',
+      detail:
+        'No ledger row was found for that retrieval id. A claim can only be filed against a fetch this ' +
+        'system performed and recorded; there is no way to file one against a page it never read.',
+    };
+  }
+
+  const id = row['id'];
+  const status = row['status'];
+  const finalUrl = row['final_url'];
+  const settledAt = row['settled_at'];
+
+  if (typeof id !== 'string' || id.trim().length === 0) {
+    return { ok: false, reason: 'unreadable', detail: 'That ledger row carries no usable id.' };
+  }
+
+  if (status !== 'ok') {
+    return {
+      ok: false,
+      reason: 'not-settled',
+      detail:
+        `That retrieval is recorded as "${typeof status === 'string' ? status : 'unreadable'}", not "ok". ` +
+        'Only a fetch that actually returned a page can be quoted: an open attempt has not finished, a ' +
+        'refused one never reached the network, and a failed one brought back nothing to read.',
+    };
+  }
+
+  if (typeof finalUrl !== 'string' || finalUrl.trim().length === 0 ||
+      typeof settledAt !== 'string' || settledAt.trim().length === 0) {
+    return {
+      ok: false,
+      reason: 'unreadable',
+      detail:
+        'That retrieval is marked ok but carries no destination or no settlement instant, so the two ' +
+        'fields rule 21 requires of every external fact cannot be taken from it.',
+    };
+  }
+
+  return {
+    ok: true,
+    retrieval: {
+      retrieval_id: id,
+      // `requested_url` is the ledger's own `url` when it has one, and the
+      // destination otherwise. It is carried for the operator; nothing downstream
+      // reads it, because a fact is filed against where the chain ENDED.
+      requested_url: typeof row['url'] === 'string' ? row['url'] : finalUrl,
+      final_url: finalUrl,
+      retrieved_at: settledAt,
+      page_title: pageTitle,
+    },
+  };
 }
 
 /* =========================================================== the fetch ==== */

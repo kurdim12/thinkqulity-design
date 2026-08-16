@@ -121,6 +121,7 @@ import { retrieveCanon, type CanonHit } from '@/lib/brain/canon/retrieve';
 import { reconcile, runJudge, type JudgeVerdict } from '@/lib/brain/judge';
 import { CapUnavailableError } from '@/lib/mcp/tools';
 import { EXTERNAL_FACTS_KIND } from '@/lib/chat/transcript';
+import { sealExternalResult, type ExternalToolResult } from '@/lib/web/facts';
 import {
   CHAT_DISPATCHABLE,
   CHAT_DISPATCH_TOOL,
@@ -1693,6 +1694,18 @@ async function runDispatchTool(
  * incapable of reaching a deliverable: it cannot be substituted (no key) and it
  * cannot be typed (no digits allowed).
  *
+ * "ALWAYS EMPTY" USED TO BE THIS SENTENCE AND NOTHING ELSE. `ChatToolResult`
+ * takes a `SourcedValue[]` whose `source_key` is an optional string, so an
+ * executor written to this spec could have returned
+ * `{ value: '4200', source_key: 'profiles.academy.followers' }` and put a web
+ * page's number into `buildValueMap()` under a key the blocks really emit —
+ * where it would be SUBSTITUTED, by code, counting toward `hard_guarantee`.
+ * That is now a shape the executor cannot have: `externalFactsResult()` below
+ * is the constructor, `ExternalToolResult` is its type, and the type's
+ * `sourced: never[]` admits exactly one value — the empty array. A doc-comment
+ * became a mechanism. See src/lib/web/facts.ts for the argument and the
+ * runtime half.
+ *
  * The payload therefore renders as a CARD, not as prose the model paraphrases.
  * `kind: EXTERNAL_FACTS_KIND` is what the chat screen keys on, imported from the
  * leaf module the screen imports too, so there is no mirrored string here.
@@ -1785,6 +1798,62 @@ export function externalFactsToolSpec(): ChatToolSpec {
  * symbol with one definition rather than a string spelled twice.
  */
 export { EXTERNAL_FACTS_KIND };
+
+/** Re-exported for the same reason: one import for the whole external surface. */
+export { sealExternalResult, type ExternalToolResult };
+
+/**
+ * THE TWO SHAPES MUST STILL AGREE.
+ *
+ * `ExternalToolResult` is declared in src/lib/web/facts.ts and satisfies
+ * `ChatToolResult` STRUCTURALLY — that file is a pure leaf and does not import
+ * the chat layer. This is where the coupling is checked, so widening either
+ * shape apart from the other is a build break here rather than a runtime
+ * surprise at the one call site. Same guard `facts.ts` uses for
+ * `RetrievalEvidence` against `fetch.ts`'s `Retrieval`.
+ */
+type Assert<T extends true> = T;
+/** A sealed result may be returned wherever a tool result is expected. */
+type _SealedIsAToolResult = Assert<ExternalToolResult extends ChatToolResult ? true : false>;
+/** And the reverse is refused: an ordinary result may declare, a sealed one may not. */
+type _ToolResultIsNotSealed = Assert<ChatToolResult extends ExternalToolResult ? false : true>;
+
+/**
+ * THE ONE CONSTRUCTOR FOR A `get_external_facts` RESULT.
+ *
+ * The executor this spec describes is not written yet — see WIRING above — and
+ * this exists so that when it is, the shape it must return is already fixed and
+ * already narrow. It takes a payload and a card and there is no third
+ * parameter: no `sourced`, no `source_keys`, nothing an external result could
+ * use to nominate a value for the lint context or the value map. The return
+ * type says the same thing to the compiler, and `sealExternalResult` says it
+ * again at runtime for a payload that crossed a JSON boundary.
+ *
+ * Deliberately NOT built on `toolResult()`: that helper takes the two fields
+ * this one exists to refuse, so routing through it would mean the refusal
+ * depended on the arguments this file happened to pass rather than on a type.
+ */
+export function externalFactsResult(
+  payload: Record<string, unknown>,
+  card?: Record<string, unknown>,
+): ExternalToolResult {
+  return sealExternalResult({
+    content: JSON.stringify({ tool: 'get_external_facts', kind: EXTERNAL_FACTS_KIND, ...payload }, null, 2),
+    ...(card === undefined ? {} : { card }),
+  });
+}
+
+/**
+ * The signature the `get_external_facts` executor must have when it is wired.
+ *
+ * Published now, next to the spec, so that wiring is a matter of supplying a
+ * function of this type rather than of choosing a return type — and choosing
+ * `ChatToolResult` there would be choosing to reopen the hole above.
+ */
+export type ExternalFactsExecutor = (
+  args: unknown,
+  deps: ChatToolDeps,
+) => Promise<ExternalToolResult>;
 
 /* ================================================== the closed allow-list ====
  *

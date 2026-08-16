@@ -369,6 +369,180 @@ test('two values separated by words are fine', () => {
 });
 
 /* ========================================================================= */
+/* 4b. ROUND 4 — THE GLUE TABLE                                              */
+/*                                                                           */
+/* The round-3 door, one level up. Here the model types NO DIGIT AT ALL: it   */
+/* writes two HONEST placeholders and welds them with one character that      */
+/* renders nothing. Both halves resolve, both are figures this codebase       */
+/* computed, the law passes — and the operator reads a number no row holds.   */
+/*                                                                           */
+/* WHY A TABLE AND NOT A CASE. Rounds 1 to 3 each closed one invisible        */
+/* character and were reopened by the next, because the question asked was    */
+/* "is this gap made of KNOWN-INVISIBLE characters" — an enumeration racing   */
+/* an alphabet that grows every Unicode release, a race this project has now  */
+/* lost four times. The engine asks the INVERTED question: "does this gap     */
+/* contain a character that actually puts ink on the page". So every row      */
+/* below is refused for the same reason rather than by name, and a character  */
+/* invented next year is refused before anyone hears of it. The table is      */
+/* evidence that the inversion holds, not the mechanism that holds it.        */
+/* ========================================================================= */
+
+/**
+ * Characters that MUST NOT count as separation between two substituted values.
+ * Every invisible one is an escape, per this file's rule; each row names the
+ * Unicode category that puts it here, and the CONTROL at the end of the file
+ * asserts those categories — which is what stops this table from quietly
+ * holding an ordinary space in place of the thing it claims to hold.
+ */
+const GLUE: readonly (readonly [string, string])[] = [
+  /* Marks. `\p{Mn}` was the round-3 door: not blank, not a joiner, not \p{Cf}. */
+  ['U+034F COMBINING GRAPHEME JOINER (Mn)', CGJ],
+  ['U+FE00 VARIATION SELECTOR-1 (Mn)', '\uFE00'],
+  ['U+FE0F VARIATION SELECTOR-16 (Mn)', '\uFE0F'],
+  ['U+180B MONGOLIAN FREE VARIATION SELECTOR ONE (Mn)', '\u180B'],
+  ['U+0303 COMBINING TILDE (Mn)', '\u0303'],
+  ['U+064B ARABIC FATHATAN (Mn)', '\u064B'],
+  ['U+20E0 COMBINING ENCLOSING CIRCLE BACKSLASH (Me)', '\u20E0'],
+  ['U+0903 DEVANAGARI SIGN VISARGA (Mc, a SPACING mark)', '\u0903'],
+  /* Letters that draw nothing. `\p{L}` is not a synonym for "visible". */
+  ['U+3164 HANGUL FILLER (Lo, zero width)', '\u3164'],
+  ['U+115F HANGUL CHOSEONG FILLER (Lo, zero width)', '\u115F'],
+  ['U+1160 HANGUL JUNGSEONG FILLER (Lo, zero width)', '\u1160'],
+  ['U+0640 ARABIC TATWEEL (Lm — a joining stroke, not a word)', '\u0640'],
+  /* A symbol that draws nothing: width without ink is still not separation. */
+  ['U+2800 BRAILLE PATTERN BLANK (So, renders blank)', '\u2800'],
+  /* The blanks the earlier rounds already held, kept as rows so the inverted
+   * rule is shown to hold everything the enumerating rule held. */
+  ['U+0020 SPACE (Zs)', ' '],
+  ['U+00A0 NO-BREAK SPACE (Zs)', '\u00A0'],
+  ['U+2007 FIGURE SPACE (Zs)', '\u2007'],
+  ['U+202F NARROW NO-BREAK SPACE (Zs)', '\u202F'],
+  ['U+0009 CHARACTER TABULATION (Cc)', '\u0009'],
+  ['U+200B ZERO WIDTH SPACE (Cf)', ZWSP],
+  ['U+200F RIGHT-TO-LEFT MARK (Cf)', RLM],
+  ['U+2060 WORD JOINER (Cf)', '\u2060'],
+  ['U+FEFF ZERO WIDTH NO-BREAK SPACE (Cf)', '\uFEFF'],
+  ['U+00AD SOFT HYPHEN (Cf)', '\u00AD'],
+  /* The two separators that live INSIDE a figure. U+066C is what an Arabic
+   * reader reads as a thousands group and `,` is what an English reader reads
+   * as one, so neither can be what ENDS one figure and starts the next:
+   * «508٬40» is 50 840 to the reader, spelled as two honest placeholders. */
+  ['U+066C ARABIC THOUSANDS SEPARATOR (Po)', ARABIC_THOUSANDS],
+  ['U+002C COMMA (Po)', ','],
+];
+
+test('BREAK 1 EXECUTED: two honest placeholders glued by U+034F deliver 50840', () => {
+  /* The break exactly as the operator received it. The model typed no digit;
+   * both halves are measurements it was entitled to cite; the character
+   * between them is not blank, not `\p{Cf}` and not a joiner — so the gap rule
+   * read the two values as SEPARATED and the side-by-side rule never fired. */
+  const result = run(
+    'متوسط التفاعل {{performance.personal.avg_engagement}}' +
+      `${CGJ}{{performance.academy.avg_engagement}} لكل منشور`,
+  );
+
+  assert.equal(result.final, `متوسط التفاعل 508${CGJ}40 لكل منشور`);
+  /* What the operator's eye receives, with the invisible taken back out. */
+  assert.equal(result.final.replaceAll(CGJ, '').includes('50840'), true);
+
+  assert.equal(result.deliverable, false);
+  assert.deepEqual(kindsOf(result), ['glued-value']);
+  assert.deepEqual(rawsOf(result), [`508${CGJ}40`]);
+});
+
+for (const [name, glue] of GLUE) {
+  test(`GLUE ${name} is not separation`, () => {
+    const result = run(
+      '{{performance.personal.avg_engagement}}' +
+        `${glue}{{performance.academy.avg_engagement}}`,
+    );
+
+    assert.equal(result.final, `508${glue}40`);
+    assert.equal(
+      result.deliverable,
+      false,
+      `"508${glue}40" was delivered — ${name} let two values read as one figure`,
+    );
+    assert.deepEqual(kindsOf(result), ['glued-value']);
+  });
+}
+
+/**
+ * Characters that MUST count as separation, so a legitimate sentence still
+ * works. An inverted rule is only worth having if the deliverable stays
+ * writable: a word, a mark of punctuation a reader can name, or a line.
+ */
+const SEPARATION: readonly (readonly [string, string])[] = [
+  ['an Arabic word', ' مقابل '],
+  ['an English word', ' and '],
+  ['a single Arabic letter', ' و '],
+  ['U+060C ARABIC COMMA (a list mark, never a digit group)', '، '],
+  ['a newline', '\n'],
+  ['U+2028 LINE SEPARATOR', '\u2028'],
+  ['an em dash (Pd)', ' — '],
+  ['a solidus (Po)', ' / '],
+  ['a plus sign (Sm)', ' + '],
+];
+
+for (const [name, gap] of SEPARATION) {
+  test(`SEPARATION ${name} really separates`, () => {
+    const result = run(
+      '{{performance.personal.avg_engagement}}' +
+        `${gap}{{performance.academy.avg_engagement}}`,
+    );
+
+    assert.equal(result.final, `508${gap}40`);
+    assert.equal(
+      result.deliverable,
+      true,
+      `"508${gap}40" was refused — ${name} is separation a reader can see`,
+    );
+    assert.deepEqual([...result.violations], []);
+  });
+}
+
+test('BREAK 1 the same glue also reopened the calendar-year exception', () => {
+  /* WHAT THIS FOUND, AND WHY IT NOW PASSES FOR A DIFFERENT REASON — stated
+   * because a test that quietly changes mechanism is a test that stops proving
+   * anything. The gap predicate had a SECOND caller: `touchesInline()`, which
+   * the calendar-year exception used to ask whether a year stood pressed
+   * against a figure. Asked as "is the gap blank", U+034F answered "not blank,
+   * so they stand apart", the year kept its exception, and «2026<U+034F>508»
+   * shipped DELIVERABLE — reading 2026508 to the operator. One predicate served
+   * both rules, which is why the fix went into the predicate.
+   *
+   * The rule-21 work then removed the calendar-year exception outright, and
+   * `touchesInline()` went with it. So this case is now refused one step
+   * earlier — a year is simply a quantity — and the assertion below is
+   * unchanged either way. It is kept as the standing guard that this exact
+   * string is never delivered again, by whichever rule gets to it first. */
+  const result = run(`خطة 2026${CGJ}{{performance.personal.avg_engagement}}`);
+
+  assert.equal(result.final, `خطة 2026${CGJ}508`);
+  assert.equal(result.deliverable, false);
+  assert.deepEqual(kindsOf(result), ['bare-quantity']);
+  assert.deepEqual(rawsOf(result), ['2026']);
+});
+
+test('CONTROL a grouping separator that really groups is caught by POSITION, not by the gap rule', () => {
+  /* `190,508` is a grammatical thousands group, so the tokeniser returns ONE
+   * quantity running across the edge of both spans — refused by position
+   * before any gap rule is consulted. It is the control for the `٬` and `,`
+   * rows above: those are refused by the GAP rule, because a two-digit tail is
+   * an ungrammatical group and the tokeniser hands back two quantities. Both
+   * spellings are refused; this test records which rule does it, so a later
+   * change to one cannot silently be credited to the other. */
+  const result = run(
+    '{{performance.personal.post_count}},{{performance.personal.avg_engagement}}',
+  );
+
+  assert.equal(result.final, '190,508');
+  assert.equal(result.deliverable, false);
+  assert.deepEqual(kindsOf(result), ['glued-value']);
+  assert.deepEqual(rawsOf(result), ['190,508']);
+});
+
+/* ========================================================================= */
 /* 5. THE DELIMITERS                                                         */
 /* ========================================================================= */
 
@@ -413,18 +587,37 @@ test('a value containing braces is inert: substitution is one pass, never a seco
 /*    to it does not                                                         */
 /* ========================================================================= */
 
-test('EXCEPTION a bare calendar year passes', () => {
+test('REMOVED EXCEPTION a bare calendar year is now a quantity like any other', () => {
+  /* This used to pass, and that is the point. «رقم متابعين قدره 2026» — a
+   * follower figure of 2026 — satisfied every clause of the old form check and
+   * shipped. The label and the magnitude sit in the same positions in both
+   * languages, so nothing in the text separates them; see the note where the
+   * exception used to be in src/lib/brain/substitute.ts for why it could not be
+   * bounded and what removing it costs. */
   const result = run('خطة 2026 تقوم على متوسط {{performance.personal.avg_engagement}}.');
 
   assert.equal(result.final, 'خطة 2026 تقوم على متوسط 508.');
-  assert.equal(result.deliverable, true);
-  assert.deepEqual([...result.violations], []);
+  assert.equal(result.deliverable, false);
+  assert.deepEqual(kindsOf(result), ['bare-quantity']);
+  assert.deepEqual(rawsOf(result), ['2026']);
 });
 
-test('EXCEPTION the year in Arabic-Indic digits passes too', () => {
+test('REMOVED EXCEPTION the year in Arabic-Indic digits is refused too', () => {
   const result = run('خطة ٢٠٢٦');
 
+  assert.equal(result.deliverable, false);
+  assert.deepEqual(kindsOf(result), ['bare-quantity']);
+});
+
+test('WHAT STILL DELIVERS a date the value map holds, substituted', () => {
+  /* The cost of removing the exception is bounded by this: a REAL date is a
+   * measured value with a key, so it reaches the reader as substituted digits
+   * exactly as before. What is gone is the model TYPING one. */
+  const result = run('اللقطة بتاريخ {{performance.snapshot.taken_on}}');
+
+  assert.equal(result.final, 'اللقطة بتاريخ 2026-08-14');
   assert.equal(result.deliverable, true);
+  assert.deepEqual([...result.violations], []);
 });
 
 test('NEAREST MISS a grouped four-digit figure is not a year', () => {
@@ -632,4 +825,63 @@ test('CONTROL the invisible characters these tests are built from are really the
   assert.equal(control.includes('\u0000'), false, 'a NUL in a control silently zeroes every scan');
   assert.deepEqual(control.match(/\p{Nd}+/gu), ['٨٨', '٥٠٨']);
   assert.deepEqual(control.match(/[\p{No}\p{Nl}]+/gu), ['⁸⁸']);
+});
+
+test('CONTROL every GLUE row is one code point, and it is the one its name claims', () => {
+  /* The table is only evidence if its rows really hold what they say. A row
+   * that had quietly become an ordinary space would pass its own test for the
+   * wrong reason and prove nothing about the character it names. */
+  const NAMED = /^U\+([0-9A-F]{4}) /u;
+  const LINE_BREAK = /[\n\r\u2028\u2029\u0085\u000B\u000C]/u;
+
+  for (const [name, glue] of GLUE) {
+    assert.equal([...glue].length, 1, `${name} is not a single code point`);
+    assert.equal(glue.includes('\u0000'), false, `${name} carries a NUL`);
+
+    const named = NAMED.exec(name);
+    assert.notEqual(named, null, `${name} does not begin with its code point`);
+    assert.equal(
+      glue.codePointAt(0),
+      Number.parseInt(named === null ? '' : named[1], 16),
+      `${name} is not the code point its name claims`,
+    );
+
+    /* No row is a line break: a line break is the one blank that DOES
+     * separate, so a stray one here would make its row pass for a reason the
+     * row was not written to test. */
+    assert.equal(LINE_BREAK.test(glue), false, `${name} is a line break`);
+  }
+});
+
+test('CONTROL the OLD rule really was blind to these, which is why it opened', () => {
+  /* THE POINT OF THE INVERSION, as a measurement rather than a claim. The rule
+   * that shipped asked whether the gap matched [\s\p{Cf}\p{Cc}] — "is every
+   * character in here one I ALREADY KNOW to be invisible". Fifteen rows of the
+   * table fall outside that class: thirteen a reader cannot see at all, and the
+   * two grouping separators a reader sees as PART OF the number. The old rule
+   * called every one of them separation and let two substituted values stand as
+   * one figure. Fifteen is not a bug count; it is the size of the enumeration
+   * gap on the day it was measured, and the next Unicode release makes it
+   * bigger. The inverted rule has no such number to grow. */
+  const OLD_BLANK_RUN = /^[\s\p{Cf}\p{Cc}]*$/u;
+
+  const missed = GLUE.filter(([, glue]) => !OLD_BLANK_RUN.test(glue));
+  assert.equal(
+    missed.length,
+    15,
+    `the old class missed: ${missed.map(([name]) => name).join('; ')}`,
+  );
+  assert.equal(OLD_BLANK_RUN.test(CGJ), false, 'U+034F is the round-3 door, by name');
+
+  /* And it held the ten blanks — which is why the blanks are rows too: the
+   * inverted rule must keep everything the enumerating rule already held. */
+  assert.equal(GLUE.filter(([, glue]) => OLD_BLANK_RUN.test(glue)).length, 10);
+
+  /* Every SEPARATION row is the opposite: something in it draws. Asserted
+   * through the same categories the engine admits, so this control fails if a
+   * row is ever softened into an invisible. */
+  const INK = /[\p{Lu}\p{Ll}\p{Lt}\p{Lo}\p{N}\p{P}\p{Sm}\p{Sc}\n\r\u2028\u2029]/u;
+  for (const [name, gap] of SEPARATION) {
+    assert.equal(INK.test(gap), true, `${name} draws nothing`);
+  }
 });

@@ -165,17 +165,106 @@ const SNIPPET_MAX_LENGTH = 80;
  */
 const NON_DECIMAL_NUMERAL = /[\p{No}\p{Nl}]+/gu;
 
-/** Anything a reader sees as blank, including the invisibles. Empty counts. */
-const BLANK_RUN = /^[\s\p{Cf}\p{Cc}]*$/u;
+/**
+ * ===========================================================================
+ * WHAT SEPARATES TWO FIGURES IS STATED POSITIVELY. THE INVERSION IS THE POINT.
+ * ===========================================================================
+ * The rule that shipped here asked the NEGATIVE question — "is this gap made
+ * only of characters I ALREADY KNOW to be invisible?" — spelled as the class
+ * `[\s\p{Cf}\p{Cc}]`. That is an enumeration of the invisible, and the
+ * invisible is not a finite set: it is whatever the next Unicode release adds.
+ * This project has now lost that race four times, and the fourth loss needed NO
+ * TYPED DIGIT AT ALL. Two honest placeholders — `{{personal}}` and
+ * `{{academy}}`, both resolving, both citing figures this codebase computed —
+ * were welded with U+034F and delivered as `508<U+034F>40`. The operator read
+ * 50840. U+034F is `\p{Mn}`: not blank, not `\p{Cf}`, so the gap tested as "not
+ * blank", the two values were called SEPARATED, and the side-by-side rule below
+ * never fired. U+FE00, U+180B and U+0303 do the same, and so will the character
+ * added next year.
+ *
+ * SO THE TEST IS INVERTED. Two substituted values are ADJACENT — one figure —
+ * UNLESS something between them actually puts ink on the page. Not "unless a
+ * known invisible is absent": UNLESS A VISIBLE IS PRESENT. The consequence is
+ * the entire reason for the change: THE DEFAULT ANSWER FOR A CHARACTER NOBODY
+ * HAS CLASSIFIED IS "NOT A SEPARATOR", so a zero-width character invented after
+ * this file was written is refused on the day it is invented, with no edit
+ * here. The unknown now falls on the CLOSED side of the door. The cost is paid
+ * in the other direction, knowingly: a gap this class does not recognise
+ * refuses a draft that may have been honest, and an operator rewrites a
+ * sentence. A false refusal is an annoyance. A false delivery is a fabricated
+ * measurement, and this file exists because those are not the same size.
+ *
+ * A NARROW POSITIVE SET IS THE SAFE ONE, so these are only the categories every
+ * member of which carries a glyph:
+ *
+ *   `\p{Lu}\p{Ll}\p{Lt}`  cased letters — always drawn.
+ *   `\p{Lo}`              the letters of uncased scripts. EVERY Arabic letter
+ *                         is `\p{Lo}`, so this is what keeps «508 مقابل 40»
+ *                         writable on the Arabic side of the product.
+ *   `\p{N}`               numerals of every class.
+ *   `\p{P}`               punctuation — «،», the dash, the full stop, the
+ *                         bracket, the percent sign.
+ *   `\p{Sm}\p{Sc}`        mathematical operators and currency signs: `×`, `+`,
+ *                         `→`, `$`. Each is a glyph with a name.
+ *
+ * AND WHAT IS LEFT OUT MATTERS MORE THAN WHAT IS IN:
+ *
+ *   `\p{Lm}`   modifier letters. U+0640 TATWEEL is one, and it draws a joining
+ *              stroke INSIDE a word, never a boundary between two figures.
+ *   `\p{M}`    every mark, combining OR spacing. A mark attaches to what
+ *              precedes it — which is exactly what U+034F, U+0303 and U+0903 do
+ *              — and an attachment is the opposite of a gap.
+ *   `\p{Z}`    the spaces. Deliberate and load-bearing: two figures with
+ *              nothing but blank between them are one figure wearing a gap,
+ *              which is «٨٨ ٥٠٨», the round-2 attack.
+ *   `\p{C}`    format, control, surrogate, private-use — and UNASSIGNED. That
+ *              last one is where the future goes: a code point this runtime has
+ *              never heard of is `\p{Cn}`, so it bears no ink, so it does not
+ *              separate, so it cannot glue two figures together.
+ *   `\p{Sk}`   modifier symbols, and
+ *   `\p{So}`   other symbols — the block holding U+2800 BRAILLE PATTERN BLANK,
+ *              which renders as an empty cell. Width with no ink is precisely
+ *              the trick this rule exists to refuse.
+ */
+const BEARS_INK = /[\p{Lu}\p{Ll}\p{Lt}\p{Lo}\p{N}\p{P}\p{Sm}\p{Sc}]/gu;
+
+/**
+ * The glyph-less members of the classes above, as UNICODE ITSELF marks them.
+ *
+ * `\p{Lo}` holds the four HANGUL FILLERS — U+115F, U+1160, U+3164, U+FFA0 —
+ * letters that draw nothing, so the category test alone would call them
+ * separation.
+ *
+ * THIS IS NOT THE OLD RACE RUN AGAIN, and the difference is the reason it is
+ * admissible: this property and `\p{Lo}` are read from the SAME Unicode table
+ * in the SAME runtime. A letter this engine can see is a letter whose ignorable
+ * status it can also see, so the two cannot fall out of step. The list that lost
+ * the race was hand-written in this file and every new Unicode version outran
+ * it; this one ships with the character it describes.
+ */
+const DRAWS_NOTHING = /\p{Default_Ignorable_Code_Point}/u;
+
+/**
+ * The separators that live INSIDE one figure: the grouping comma and the
+ * decimal point, in both spellings, exactly the four characters claims-linter.ts
+ * names as GROUP_SEPARATOR and DECIMAL_SEPARATOR.
+ *
+ * A CHARACTER A READER READS AS PART OF A NUMBER CANNOT BE WHAT ENDS ONE NUMBER
+ * AND BEGINS THE NEXT. `{{personal}}٬{{academy}}` renders `508٬40`, which an
+ * Arabic reader reads as 50 840; `{{personal}},{{academy}}` renders `508,40`.
+ * Both are the original attack assembled from two honest placeholders, and
+ * neither character separates them.
+ *
+ * They are re-spelled rather than imported because this module needs them only
+ * as an EXCLUSION, and that makes the drift direction safe: a list WIDER than
+ * the tokeniser's refuses more, never less. U+060C ARABIC COMMA is deliberately
+ * absent — it is a list mark and never groups digits, so «508، 40» reads as two
+ * figures and is delivered.
+ */
+const FIGURE_INTERNAL = /[,٬.٫]/u;
 
 /** Every character that ends a line. A line break is a separation a reader sees. */
 const LINE_BREAK = /[\n\r\u2028\u2029\u0085\u000B\u000C]/u;
-
-/** Exactly four ASCII digits after normalisation: no separator, no invisible. */
-const FOUR_BARE_DIGITS = /^\d{4}$/;
-
-/** 1900 to 2100, spelled as digits. Mirrors the claims-linter; no arithmetic. */
-const YEAR = /^(?:19\d\d|20\d\d|2100)$/;
 
 /** One digit, 1 to 9, after normalisation. Never a two-digit head like `٨٨`. */
 const SINGLE_ORDINAL_DIGIT = /^[1-9]$/;
@@ -184,6 +273,11 @@ const SINGLE_ORDINAL_DIGIT = /^[1-9]$/;
  * What may follow a list ordinal: `1.` and `1)` are Markdown, `١-` is how the
  * Arabic side of this product actually numbers a list. Whatever follows must
  * then end the line or be blank, so `5-10` is not an ordinal.
+ *
+ * AUDITED ALONGSIDE THE GAP RULE. This blank class enumerates too, but it sits
+ * on the PERMISSIVE side of its rule — matching GRANTS the exception — so a
+ * character it does not know refuses the draft instead of shipping it. Same
+ * direction as everything else here: the unknown is a violation, never a pass.
  */
 const ORDINAL_TAIL = /^[.)\-](?:$|[\s\p{Cf}])/u;
 
@@ -309,21 +403,52 @@ function overlapsSpan(spans: readonly Span[], start: number, end: number): boole
 }
 
 /**
- * Whether `[from, to)` is blank AND holds no line break.
+ * Whether anything in `[from, to)` really separates two figures.
  *
- * The claims-linter counts a newline as blank, deliberately: it cannot tell a
- * value from a claim, so it must assume the worst about a gap. This engine KNOWS
- * which characters it wrote, so it can afford the true rule — a line break is a
- * separation a reader sees, two numbers on two lines are two numbers, and two
- * numbers with nothing but spaces between them on ONE line are one figure
- * wearing a gap.
+ * TRUE REQUIRES A POSITIVE FINDING: either a line break, or one character that
+ * bears ink and is neither ignorable nor part of a number. Everything else —
+ * every blank, every mark, every format character, every code point this
+ * runtime has never heard of — leaves the two figures ADJACENT. That is the
+ * inversion, and it is stated as a loop over what was found rather than as a
+ * test on what was absent so that the failing direction stays visible: this
+ * function returns false when it finds nothing, and finding nothing is the
+ * normal outcome for a character it does not know.
+ *
+ * A LINE BREAK IS SEPARATION, and it is the one blank that is. The claims-linter
+ * counts a newline as blank because it cannot tell a value from a claim and must
+ * assume the worst; this engine knows which characters it wrote, so it can
+ * afford the true rule — two figures on two lines are two figures.
+ *
+ * The predicate this replaced was `inlineGap()`, which asked whether the gap was
+ * BLANK and answered the same question backwards. It is gone rather than
+ * renamed: leaving it would leave the old question askable.
  */
-function inlineGap(text: string, from: number, to: number): boolean {
+function separatesFigures(text: string, from: number, to: number): boolean {
   const gap = text.slice(from, to);
-  return BLANK_RUN.test(gap) && !LINE_BREAK.test(gap);
+  if (LINE_BREAK.test(gap)) return true;
+
+  BEARS_INK.lastIndex = 0;
+  for (const found of gap.matchAll(BEARS_INK)) {
+    const character = found[0];
+    if (DRAWS_NOTHING.test(character)) continue;
+    if (FIGURE_INTERNAL.test(character)) continue;
+    return true;
+  }
+  return false;
 }
 
-/** Nothing but spaces and tabs back to the start of the line. */
+/**
+ * Nothing but spaces and tabs back to the start of the line.
+ *
+ * AUDITED ALONGSIDE THE GAP RULE ABOVE AND DELIBERATELY LEFT ALONE. It asks the
+ * same shape of question — "is there anything between here and the line start?"
+ * — but it already answers POSITIVELY: it returns true only where it FINDS a
+ * line break (or the start of the text), and any character it does not
+ * recognise, invisible or not, makes it return false. Returning false DENIES
+ * the ordinal exception, so the unknown already falls on the closed side of
+ * this door. Inverting it would change no answer; widening what it skips would
+ * open one, which is why it skips exactly two characters.
+ */
 function atLineStart(text: string, at: number): boolean {
   for (let i = at - 1; i >= 0; i -= 1) {
     const character = text[i];
@@ -334,41 +459,74 @@ function atLineStart(text: string, at: number): boolean {
 }
 
 /**
- * EXCEPTION 1 — A CALENDAR YEAR.
+ * ===========================================================================
+ * THE CALENDAR-YEAR EXCEPTION IS GONE. A YEAR IS A QUANTITY.
+ * ===========================================================================
+ * It used to be exception 1: exactly four bare digits inside 1900–2100,
+ * unmarked, bounded, not inline beside another quantity. It is REMOVED, and
+ * this note is what stands in its place because a deleted exception that leaves
+ * no argument behind gets re-added by the next reader.
  *
- * The principle both exceptions answer to: DIGITS MAY BE A LABEL, NEVER A
- * MAGNITUDE. A year names a position in the calendar the way a word names a
- * month; nobody reads a follower count out of «خطة 2026». And unlike a palette
- * or a metric, the calendar is an OPEN set — the system cannot enumerate every
- * year the model might legitimately name, so there is no placeholder to offer
- * instead. That is the whole justification, and it is why the palette did NOT
- * get an exception: a swatch comes from a closed set this app already holds, so
- * `#48C0C0` is a placeholder, exactly as `paletteRefs()` already asks frames to
- * name a swatch rather than type a hex.
+ * WHAT IT DELIVERED. «رقم متابعين قدره 2026» — a follower figure of 2026 —
+ * passed every clause of the form check and shipped untouched, as did 1987.
+ * 201 values were typeable, and a follower count is exactly the kind of figure
+ * that lands inside that range. The controls held (4200 chipped, `2,026`
+ * chipped) which is what made the door invisible: the exception was working
+ * precisely as written, and what was written was wrong.
  *
- * The form is nailed shut around that meaning: exactly four digits with nothing
- * hidden between them, inside 1900–2100, carrying no unit, touching no letter,
- * and not sitting inline beside another quantity. `2,026` is a figure and fails.
- * `2026٪` is a rate and fails. `٢٠٢٦` beside a substituted value fails.
+ * WHY IT COULD NOT BE BOUNDED INSTEAD. The brief for the surviving exception is
+ * that digits may be a LABEL, never a MAGNITUDE, and a bound has to separate
+ * the two from the text alone. It cannot be done here:
  *
- * THE RESIDUAL: a draft may write "2026" and mean it as a count. 201 values are
- * reachable this way and none of them is a figure this client's accounts hold.
- * It is a door, it is the narrowest one that keeps the calendar writable, and it
- * is stated here rather than discovered later.
+ *   * NOT BY POSITION. Both languages put the counted noun AFTER the numeral
+ *     ("2026 followers", «٢٠٢٦ متابع») AND admit the prepositional order with
+ *     the noun before it ("a follower figure of 2026", «رقم متابعين قدره
+ *     2026»). A calendar label takes both shapes too — «خطة 2026», "August
+ *     2026". The label and the magnitude occupy the same positions, so no
+ *     positional rule tells them apart. That is the difference between this
+ *     exception and the one below, which survives BECAUSE it is positional: a
+ *     single digit at the head of a line, followed by a list marker, is
+ *     somewhere no measurement is ever written.
+ *   * NOT BY VOCABULARY. Requiring a calendar word beside the year («عام»,
+ *     "August") is an enumeration, and it would still admit «عام 2026 متابع»
+ *     while refusing «خطة 2026» — the one phrase the exception existed for. A
+ *     rule that rejects its own motivating case and still passes the attack is
+ *     not a bound.
+ *
+ * That leaves the value test itself — "is it between 1900 and 2100" — and a
+ * test on the VALUE of a number is the primitive this whole file was written to
+ * abandon (see the header). The year exception was the last place it survived.
+ *
+ * WHAT IT COSTS, PLAINLY. The model can no longer type a year at all.
+ *
+ *   * DATES ARE UNAFFECTED, and they are the common case: a real date reaches
+ *     the reader as a substituted value already — `{{performance.snapshot.
+ *     taken_on}}` emits `2026-08-14`, digits and all, from the value map.
+ *   * A YEAR USED AS A LABEL — «خطة 2026», "the 2026 plan" — must now be
+ *     written in words («الخطة القادمة», "next year's plan") or dropped. That
+ *     is a real loss of natural phrasing and it is the whole bill.
+ *   * A CALENDAR NAMESPACE WAS CONSIDERED AND REJECTED. `{{calendar.2026}}`
+ *     resolving to "2026" would restore the phrasing, but it hands back exactly
+ *     the same 201 values through a different door — «لديها {{calendar.2026}}
+ *     متابع» delivers the identical sentence. It would move the fabrication
+ *     into the draft where a reviewer might see it, and change nothing about
+ *     what ships. An exception wearing a placeholder is still an exception.
  */
-function isCalendarYear(quantity: Quantity): boolean {
-  if (quantity.marked || !quantity.bounded) return false;
-  if (!FOUR_BARE_DIGITS.test(normaliseDigits(quantity.raw))) return false;
-  return YEAR.test(quantity.key);
-}
 
 /**
- * EXCEPTION 2 — A SINGLE-DIGIT LIST ORDINAL AT THE HEAD OF A LINE.
+ * THE ONE EXCEPTION — A SINGLE-DIGIT LIST ORDINAL AT THE HEAD OF A LINE.
  *
- * Same principle: `١.` names a position in a list, and a reader parses it as
- * structure before they parse it as a number. Like the calendar and unlike a
- * measurement, list positions are an open sequence the system cannot enumerate.
+ * The principle: DIGITS MAY BE A LABEL, NEVER A MAGNITUDE. `١.` names a
+ * position in a list, and a reader parses it as structure before they parse it
+ * as a number. Unlike a measurement, list positions are an open sequence the
+ * system cannot enumerate, so there is no placeholder to offer instead.
  *
+ * WHAT MAKES IT ADMISSIBLE WHERE THE CALENDAR YEAR WAS NOT: this is a test on
+ * POSITION, not on value. Any digit 1–9 qualifies — the check never asks what
+ * the number IS. It asks where it sits, and it sits somewhere a measurement is
+ * never written.
+ *
+
  * ONE DIGIT, 1 TO 9. Two digits would except `٨٨.` at the head of a line, and
  * `٨٨` is the exact head of the attack this file exists to close. A list past
  * nine items is bulleted, or numbered by whatever renders it — a cost paid
@@ -534,7 +692,6 @@ export function substitute(draft: string, values: ReadonlyMap<string, string>): 
       continue;
     }
 
-    if (isCalendarYear(quantity) && !touchesInline(final, found, index)) continue;
     if (isListOrdinal(final, quantity)) continue;
 
     quantityFaults.push({
@@ -545,8 +702,9 @@ export function substitute(draft: string, values: ReadonlyMap<string, string>): 
       raw: quantity.raw,
       evidence:
         `"${quantity.raw}" is a quantity the draft typed directly. Internal quantities reach the ` +
-        'screen only by code substituting a placeholder that names a source key; the permitted ' +
-        'exceptions are a bare calendar year and a single-digit list ordinal at the head of a line.',
+        'screen only by code substituting a placeholder that names a source key; the one permitted ' +
+        'exception is a single-digit list ordinal at the head of a line. A year is not an exception: ' +
+        'it names a position in the calendar to a reader and a magnitude to anyone who wants one.',
     });
   }
 
@@ -555,12 +713,17 @@ export function substitute(draft: string, values: ReadonlyMap<string, string>): 
   /* The claims-linter names this residual in its own header and cannot close
    * it: it cannot tell which of two neighbouring numbers is evidence. Here both
    * sides are known to be substituted values, so «٨٨ ٥٠٨» written as two honest
-   * placeholders — which a reader reads as 88508 — is refusable, and refused. */
+   * placeholders — which a reader reads as 88508 — is refusable, and refused.
+   *
+   * THE QUESTION IS ASKED POSITIVELY, and this is the one place it is asked: a
+   * pair stays glued unless `separatesFigures()` FINDS something between them.
+   * Asked the other way round — "unless the gap is made of invisibles I know" —
+   * this rule shipped `508<U+034F>40` as deliverable. */
   for (let index = 0; index + 1 < found.length; index += 1) {
     const left = owners[index];
     const right = owners[index + 1];
     if (left === null || right === null || left === right) continue;
-    if (!inlineGap(final, found[index].end, found[index + 1].start)) continue;
+    if (separatesFigures(final, found[index].end, found[index + 1].start)) continue;
     quantityFaults.push({
       kind: 'glued-value',
       frame: 'final',
@@ -568,8 +731,9 @@ export function substitute(draft: string, values: ReadonlyMap<string, string>): 
       end: found[index + 1].end,
       raw: final.slice(found[index].start, found[index + 1].end),
       evidence:
-        'Two substituted values stand side by side on one line with nothing but blank space ' +
-        'between them, which reads as a single larger figure. Put words between them, or a line.',
+        'Two substituted values stand side by side with nothing VISIBLE between them — no word, ' +
+        'no punctuation, no line — which reads as a single larger figure. Whatever stands between ' +
+        'two figures has to be something the reader can actually see.',
     });
   }
 
@@ -603,16 +767,6 @@ export function substitute(draft: string, values: ReadonlyMap<string, string>): 
   };
 }
 
-/**
- * Whether the quantity at `index` stands inline beside another quantity.
- *
- * Only the calendar-year exception consults this: a year is a label, but a label
- * pressed against a figure on the same line stops reading as one. Declared after
- * `substitute()` because it belongs to the exception, not to the pass.
- */
-function touchesInline(text: string, found: readonly Quantity[], index: number): boolean {
-  const here = found[index];
-  if (index > 0 && inlineGap(text, found[index - 1].end, here.start)) return true;
-  if (index + 1 < found.length && inlineGap(text, here.end, found[index + 1].start)) return true;
-  return false;
-}
+/* `touchesInline()` used to be declared here. It had exactly one caller — the
+ * calendar-year exception — and it went out with it. The two-values-side-by-side
+ * rule inside `substitute()` never used it; it asks about the gap directly. */
